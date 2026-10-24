@@ -55,9 +55,6 @@ Empowerx/
 │       └── tasks/
 │           └── radiology_tasks.py
 ├── migrations/                 # Alembic
-├── unit_testing/               # Smoke / policy scripts (not formal pytest yet)
-│   └── input/                  # Drop sample .dcm files here (gitignored)
-├── unit_testing_results/       # Script outputs (gitignored)
 ├── uploads/                    # Staged DICOMs (UPLOAD_DIR, gitignored)
 ├── preprocessed/               # X-ray PNGs (PREPROCESS_IMAGE_DIR, gitignored)
 ├── tests/                      # Reserved for pytest
@@ -183,4 +180,4 @@ Notable columns (some reserved for later wiring):
 
 ## License / PHI
 
-Treat DICOM uploads and preprocessed images as **sensitive**. Sample inputs under `unit_testing/input/` and runtime folders `uploads/` / `preprocessed/` are gitignored — do not commit PHI.
+Treat DICOM uploads and preprocessed images as **sensitive**. Runtime folders `uploads/` / `preprocessed/` are gitignored — do not commit PHI.

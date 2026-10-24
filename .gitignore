@@ -34,10 +34,6 @@ findings/
 uploads/
 *.log
 
-# Temporary unit-test outputs (keep folder, ignore generated files)
-unit_testing_results/**
-!unit_testing_results/.gitkeep
-
-# Sample DICOMs used only for local testing (do not commit PHI)
-unit_testing/input/**
-!unit_testing/input/.gitkeep
+# Local-only smoke tests / outputs (do not push)
+unit_testing/
+unit_testing_results/

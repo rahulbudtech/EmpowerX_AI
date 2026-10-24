@@ -1,0 +1,21 @@
+# Empowerx backend — runtime dependencies (Python >=3.11,<3.13)
+# Install: pip install -r requirements.txt
+# Also mirrored in pyproject.toml
+
+pydantic==2.14.1
+pydantic-settings==2.16.1
+numpy==2.4.6
+Pillow==13.0.0
+pydicom==3.0.2
+pylibjpeg==2.1.0
+pylibjpeg-libjpeg==2.4.0
+pylibjpeg-openjpeg==2.6.0
+google-genai==2.32.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+sqlalchemy>=2.0.36
+psycopg[binary]>=3.2.0
+alembic>=1.14.0
+redis==6.4.0
+celery[redis]==5.6.3

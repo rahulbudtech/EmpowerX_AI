@@ -1,0 +1,43 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local runtime artifacts
+preprocessed/
+findings/
+uploads/
+*.log
+
+# Temporary unit-test outputs (keep folder, ignore generated files)
+unit_testing_results/**
+!unit_testing_results/.gitkeep
+
+# Sample DICOMs used only for local testing (do not commit PHI)
+unit_testing/input/**
+!unit_testing/input/.gitkeep

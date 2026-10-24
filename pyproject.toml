@@ -1,0 +1,41 @@
+[project]
+name = "empowerx"
+version = "0.1.0"
+description = "Empowerx medical AI backend (radiology-first)"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "numpy>=1.26",
+  "Pillow>=10.2",
+  "pydicom>=2.4",
+  # Compressed DICOM transfer syntaxes (JPEG / JPEG2000)
+  "pylibjpeg>=2.0",
+  "pylibjpeg-libjpeg>=2.1",
+  "pylibjpeg-openjpeg>=2.1",
+  "google-genai>=1.0.0",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "python-multipart>=0.0.9",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2.0",
+  "alembic>=1.14.0",
+  "redis>=5.0.0",
+  "celery[redis]>=5.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+# Optional native decoder (install separately if needed on your OS)
+# gdcm = ["python-gdcm>=3.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

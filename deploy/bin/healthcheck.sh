@@ -83,13 +83,24 @@ if [[ "$db_rc" -ne 0 ]]; then
 fi
 log "PostgreSQL connectivity check passed"
 
-set +e
-invoke_runtime check-worker
-worker_rc=$?
-set -e
-if [[ "$worker_rc" -ne 0 ]]; then
-  log "Celery worker check failed"
-  exit 22
-fi
-log "Celery worker responded"
-exit 0
+worker_attempts="${EMPOWERX_AI_WORKER_CHECK_ATTEMPTS:-5}"
+worker_delay="${EMPOWERX_AI_WORKER_CHECK_DELAY:-3}"
+worker_rc=1
+worker_attempt=1
+while [[ "$worker_attempt" -le "$worker_attempts" ]]; do
+  set +e
+  invoke_runtime check-worker
+  worker_rc=$?
+  set -e
+  if [[ "$worker_rc" -eq 0 ]]; then
+    log "Celery worker responded"
+    exit 0
+  fi
+  if [[ "$worker_attempt" -lt "$worker_attempts" ]]; then
+    log "Celery worker check attempt ${worker_attempt}/${worker_attempts} failed; retrying"
+    sleep "$worker_delay"
+  fi
+  worker_attempt=$((worker_attempt + 1))
+done
+log "Celery worker check failed"
+exit 22

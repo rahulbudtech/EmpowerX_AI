@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -184,9 +185,112 @@ def test_worker_startup_failure_rolls_back(tmp_path: Path) -> None:
     layout, result = _deploy_and_expect_rollback(tmp_path, worker_mode="fail-deploy")
     assert result.returncode == 8, result.stderr
     assert "Celery worker check failed" in result.stderr
+    assert "rolled back" in result.stderr
     assert (layout["live"] / "app" / "VERSION").read_text() == "v1\n"
     assert_persistent(layout["live"])
     assert_clean_log(result.stderr)
+    worker_calls = [
+        line
+        for line in (layout["state"] / "stub-runtime" / "calls").read_text().splitlines()
+        if line.strip() == "check-worker"
+    ]
+    # Five failed deploy attempts, then one successful rollback check.
+    assert len(worker_calls) == 6
+
+
+def test_celery_worker_retry_succeeds(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+    stub = layout["state"] / "stub-runtime"
+    (stub / "worker-mode").write_text("fail-then-ok\n")
+    (stub / "worker-fail-until").write_text("2\n")
+    layout["env"]["EMPOWERX_AI_HEALTH_PHASE"] = "deploy"
+    result = run("deploy/bin/healthcheck.sh", [], layout["env"])
+    assert result.returncode == 0, result.stderr
+    calls = (stub / "calls").read_text().splitlines()
+    assert calls.count("check-worker") == 3
+    assert "Celery worker responded" in result.stderr
+    assert "retrying" in result.stderr
+    assert_clean_log(result.stderr)
+
+
+def test_celery_worker_retries_exhausted(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+    stub = layout["state"] / "stub-runtime"
+    (stub / "worker-mode").write_text("fail-deploy\n")
+    layout["env"]["EMPOWERX_AI_HEALTH_PHASE"] = "deploy"
+    result = run("deploy/bin/healthcheck.sh", [], layout["env"])
+    assert result.returncode == 22, result.stderr
+    calls = (stub / "calls").read_text().splitlines()
+    assert calls.count("check-worker") == 5
+    assert "Celery worker check failed" in result.stderr
+    assert "Celery worker responded" not in result.stderr
+    assert_clean_log(result.stderr)
+
+
+def test_runtime_acl_failure_leaves_env_untouched(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+    release = layout["state"] / "releases" / NEW
+    release.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(layout["live"] / "app", release / "app")
+    shutil.copytree(layout["live"] / "migrations", release / "migrations")
+    for name in ("requirements.txt", "alembic.ini", "pyproject.toml"):
+        shutil.copy2(layout["live"] / name, release / name)
+    log_path = layout["state"] / "setfacl.log"
+    write_exe(
+        layout["state"] / "bin" / "setfacl",
+        textwrap.dedent(
+            f"""\
+            #!/bin/bash
+            printf '%s\\n' "$*" >> "{log_path}"
+            exit 1
+            """
+        ),
+    )
+    env_path = layout["live"] / ".env"
+    env_mode = stat.S_IMODE(env_path.stat().st_mode)
+    env_text = env_path.read_text()
+    script = textwrap.dedent(
+        f"""\
+        source "{REPO}/deploy/lib/common.sh"
+        source "{REPO}/deploy/lib/release.sh"
+        production_mode() {{ return 0; }}
+        build_release "{release}"
+        """
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=layout["env"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 5, result.stderr
+    assert "runtime ACL setup failed" in result.stderr
+    assert not (release / ".release-complete").exists()
+    assert env_path.read_text() == env_text
+    assert not env_path.is_symlink()
+    assert stat.S_IMODE(env_path.stat().st_mode) == env_mode
+    assert stat.S_IMODE(env_path.stat().st_mode) & stat.S_IWOTH == 0
+    assert stat.S_IMODE(env_path.stat().st_mode) & stat.S_IROTH == 0
+    logged = log_path.read_text()
+    assert "-R -m u:empowerx-ai:rX" in logged
+    assert str(release / ".venv") in logged
+    assert ".env" not in logged
+    assert str(layout["live"] / ".env") not in logged
+    assert_persistent(layout["live"])
+    assert_clean_log(result.stderr)
+
+
+def test_installer_requires_setfacl_without_installing_packages() -> None:
+    text = (REPO / "deploy/vps/install.sh").read_text()
+    assert "command -v setfacl" in text
+    assert "acl package is not installed" in text
+    lowered = text.lower()
+    assert "apt-get" not in lowered
+    assert "apt install" not in lowered
+    assert "dnf install" not in lowered
+    assert "yum install" not in lowered
+    assert "apk add" not in lowered
 
 
 def test_health_check_timeout_rolls_back(tmp_path: Path) -> None:

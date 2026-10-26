@@ -248,6 +248,8 @@ def make_layout(tmp: Path) -> dict[str, Path]:
             "EMPOWERX_AI_HEALTH_TIMEOUT": "2",
             "EMPOWERX_AI_HEALTH_INTERVAL": "0.2",
             "EMPOWERX_AI_CURL_MAX_TIME": "1",
+            "EMPOWERX_AI_WORKER_CHECK_ATTEMPTS": "5",
+            "EMPOWERX_AI_WORKER_CHECK_DELAY": "0",
             "EMPOWERX_AI_LOCK_TRIES": "30",
             "EMPOWERX_AI_BASELINE_SHA": BASELINE,
             "PATH": str(bin_dir) + os.pathsep + env.get("PATH", ""),

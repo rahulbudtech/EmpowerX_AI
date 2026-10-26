@@ -106,6 +106,9 @@ build_release() {
     log "application import failed after dependency installation"
     return 5
   fi
+  if production_mode; then
+    setfacl -R -m u:empowerx-ai:rX "$release/.venv" || { log "runtime ACL setup failed"; return 5; }
+  fi
   printf 'ok\n' > "$release/.release-complete"
   return 0
 }

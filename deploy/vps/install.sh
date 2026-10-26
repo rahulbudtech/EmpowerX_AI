@@ -115,6 +115,7 @@ fi
 for tool in pm2 rsync curl tar runuser ssh-keygen; do
   command -v "$tool" >/dev/null 2>&1 || die 4 "required command missing: $tool"
 done
+command -v setfacl >/dev/null 2>&1 || die 4 "required command missing: setfacl (acl package is not installed)"
 
 pg_dump_bin=""
 for candidate in /usr/lib/postgresql/18/bin/pg_dump /usr/bin/pg_dump; do

@@ -1,0 +1,10 @@
+# EmpowerX AI deployment account. Installed by deploy/vps/install.sh.
+# Ubuntu 26.04 sudo rejects a per-user tty override, so this file does not set one.
+Defaults:empowerx-ai-deploy env_reset
+Defaults:empowerx-ai-deploy secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults:empowerx-ai-deploy !setenv
+
+empowerx-ai-deploy ALL=(root) NOPASSWD: /usr/local/sbin/empowerx-ai-pm2
+empowerx-ai-deploy ALL=(root) NOPASSWD: /usr/local/sbin/empowerx-ai-activate
+empowerx-ai-deploy ALL=(root) NOPASSWD: /usr/local/sbin/empowerx-ai-migrate
+empowerx-ai-deploy ALL=(empowerx-ai) NOPASSWD: /usr/local/sbin/empowerx-ai-runtime

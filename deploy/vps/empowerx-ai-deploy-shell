@@ -1,0 +1,61 @@
+#!/bin/bash
+# Forced SSH command. The client supplies one allowlisted action and nothing else.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export EMPOWERX_DEPLOY_ROOT="$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+apply_security_posture
+umask 027
+
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+if [[ -z "$cmd" && ! production_mode && -n "${EMPOWERX_AI_ORIGINAL_COMMAND:-}" ]]; then
+  cmd="$EMPOWERX_AI_ORIGINAL_COMMAND"
+fi
+[[ -n "$cmd" ]] || die 2 "interactive shells are disabled"
+if printf '%s\n' "$cmd" | grep -q '[;&|<>`$()\\]'; then
+  die 2 "command rejected"
+fi
+
+set -f
+# shellcheck disable=SC2086
+set -- $cmd
+set +f
+
+action="${1:-}"
+case "$action" in
+  receive-artifact)
+    [[ $# -eq 2 ]] || die 2 "command rejected"
+    assert_sha "$2" || die 2 "invalid commit sha"
+    exec "$ROOT/bin/receive-artifact.sh" "$2"
+    ;;
+  deploy)
+    [[ $# -eq 2 || $# -eq 3 ]] || die 2 "command rejected"
+    assert_sha "$2" || die 2 "invalid commit sha"
+    if [[ $# -eq 3 ]]; then
+      [[ "$3" == "migrate=yes" ]] || die 2 "command rejected"
+      exec "$ROOT/bin/deploy.sh" "$2" "$3"
+    fi
+    exec "$ROOT/bin/deploy.sh" "$2"
+    ;;
+  rollback)
+    [[ $# -eq 1 ]] || die 2 "command rejected"
+    exec "$ROOT/bin/rollback.sh"
+    ;;
+  status)
+    [[ $# -eq 1 ]] || die 2 "command rejected"
+    load_config
+    printf 'current=%s\n' "$(read_state current || printf '%s' missing)"
+    exec "$ROOT/bin/healthcheck.sh"
+    ;;
+  check-migrations)
+    [[ $# -eq 2 ]] || die 2 "command rejected"
+    assert_sha "$2" || die 2 "invalid commit sha"
+    exec "$ROOT/vps/empowerx-ai-runtime" check-migrations "$2"
+    ;;
+  *)
+    die 2 "command rejected"
+    ;;
+esac

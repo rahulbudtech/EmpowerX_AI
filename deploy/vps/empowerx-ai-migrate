@@ -1,0 +1,67 @@
+#!/bin/bash
+# Root helper for one explicitly approved Alembic upgrade. No downgrade path.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+apply_security_posture
+load_config
+
+[[ "${1:-}" == "apply" ]] || die 2 "usage: empowerx-ai-migrate apply SHA"
+assert_sha "${2:-}" || die 2 "invalid commit sha"
+sha="$2"
+
+if production_mode; then
+  approval="/etc/empowerx-ai/allow-migrations"
+else
+  approval="${EMPOWERX_AI_APPROVAL_FILE:-$EMPOWERX_AI_STATE_DIR/allow-migrations}"
+fi
+[[ -f "$approval" ]] || die 6 "migration approval file is not present"
+head_expected="$(tr -d '[:space:]' < "$approval")"
+assert_revision "$head_expected" || die 6 "approval revision is malformed"
+
+if [[ "${EMPOWERX_AI_TEST_MODE:-}" == "1" ]] && ! production_mode; then
+  want="$(tr -d '[:space:]' < "$EMPOWERX_AI_STATE_DIR/stub-runtime/head")"
+  [[ "$head_expected" == "$want" ]] || die 6 "approval revision does not match the incoming head"
+  mv "$approval" "${approval}.used.$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$EMPOWERX_AI_STATE_DIR/stub-runtime"
+  printf 'apply %s\n' "$sha" >> "$EMPOWERX_AI_STATE_DIR/stub-runtime/calls"
+  log "test mode recorded migration approval for $head_expected"
+  exit 0
+fi
+
+release="$EMPOWERX_AI_STATE_DIR/releases/$sha"
+py="$release/.venv/bin/python"
+[[ -x "$py" ]] || die 6 "release interpreter is missing"
+set +e
+out="$(runuser -u empowerx-ai -- "$py" "$ROOT/lib/migration_status.py" check \
+  --release "$release" \
+  --env-file "$EMPOWERX_AI_LIVE_DIR/.env" 2>&1)"
+rc=$?
+set -e
+printf '%s\n' "$out" | redact_stream >&2
+[[ "$rc" -eq 10 ]] || die 6 "migration is not pending"
+head_line="$(printf '%s\n' "$out" | awk -F= '/^head=/{print $2; exit}')"
+[[ "$head_line" == "$head_expected" ]] || die 6 "approval revision does not match the incoming head"
+
+mv "$approval" "/etc/empowerx-ai/allow-migrations.used.$(date -u +%Y%m%dT%H%M%SZ)"
+work="$(mktemp -d /tmp/empowerx-ai-mig.XXXXXX)"
+chown empowerx-ai:empowerx-ai "$work"
+chmod 700 "$work"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+if ! runuser -u empowerx-ai -- env EMPOWERX_AI_PG_DUMP="${EMPOWERX_AI_PG_DUMP:-pg_dump}" \
+  "$py" "$ROOT/lib/migration_status.py" upgrade \
+  --release "$release" \
+  --env-file "$EMPOWERX_AI_LIVE_DIR/.env" \
+  --backup "$work/ai-tables.dump" \
+  --expect-head "$head_expected"; then
+  rm -rf "$work"
+  die 6 "migration upgrade failed; database was not restored automatically"
+fi
+mkdir -p "$EMPOWERX_AI_STATE_DIR/backups/migrations"
+install -m 600 -o root -g root "$work/ai-tables.dump" \
+  "$EMPOWERX_AI_STATE_DIR/backups/migrations/${stamp}-${head_expected}.dump"
+rm -rf "$work"
+log "applied approved migration $head_expected"

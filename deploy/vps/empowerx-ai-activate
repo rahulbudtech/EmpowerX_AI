@@ -1,0 +1,17 @@
+#!/bin/bash
+# Root helper: switch the live tree to one release. Persistent data stays put.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export EMPOWERX_DEPLOY_ROOT="$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+# shellcheck disable=SC1091
+source "$ROOT/lib/release.sh"
+
+apply_security_posture
+load_config
+
+[[ "${1:-}" == "switch" ]] || die 2 "usage: empowerx-ai-activate switch SHA"
+assert_sha "${2:-}" || die 2 "invalid commit sha"
+switch_release "$2"

@@ -26,6 +26,7 @@ Empowerx/
 ├── app/
 │   ├── main.py                 # FastAPI entry
 │   ├── api/
+│   │   ├── deps.py             # Auth deps (X-API-Key + JWT)
 │   │   ├── router.py           # Mounts route modules
 │   │   └── routes/
 │   │       ├── health.py
@@ -39,6 +40,7 @@ Empowerx/
 │   │   ├── database.py         # Postgres session
 │   │   └── redis.py
 │   ├── modules/
+│   │   ├── auth/               # Verify Node service key + access JWT
 │   │   ├── radiology/          # Domain logic (thin routes call here)
 │   │   │   ├── preprocess.py   # DICOM → uint8 X-ray + safe metadata
 │   │   │   ├── llm.py          # Gemini findings
@@ -115,6 +117,11 @@ cp .env.example .env
 | `PREPROCESS_IMAGE_DIR` | Preprocessed X-ray PNGs (default `preprocessed`) |
 | `MAX_DICOM_FILES_PER_REQUEST` | Max files per upload (default `3`) |
 | `MAX_DICOM_FILE_SIZE_MB` | Max size per DICOM (default `10`) |
+| `AI_SERVICE_KEY` | Shared with Node — required on radiology routes as `X-API-Key` |
+| `JWT_ACCESS_SECRET` | Same HS256 secret as Node — verifies user access JWT on analyze |
+| `JWT_ALGORITHM` | Default `HS256` |
+
+Radiology routes require Node auth (`X-API-Key`; analyze also needs `Authorization: Bearer`). `/health` stays public.
 
 API and Celery worker must share the **same disk** for `UPLOAD_DIR` / `PREPROCESS_IMAGE_DIR` until S3 is wired.
 

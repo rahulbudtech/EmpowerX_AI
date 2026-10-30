@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.api.deps import require_analyze_caller, require_service_api_key_optional_user
 from app.infrastructure.database import get_db
+from app.modules.auth.schemas import AccessTokenClaims
 from app.modules.radiology.schemas import (
     DicomAnalyzeBatchQueuedResponse,
     FindingsDetailResponse,
@@ -20,6 +23,8 @@ from app.modules.radiology.service import (
     enqueue_dicom_batch,
     get_findings,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/radiology", tags=["radiology"])
 
@@ -40,8 +45,16 @@ async def analyze_dicom(
         description="Optional provisional case id (applied to all files in the batch)",
     ),
     db: Session = Depends(get_db),
+    caller: AccessTokenClaims = Depends(require_analyze_caller),
 ) -> DicomAnalyzeBatchQueuedResponse:
     """Accept uploads → queue one job per file → return job ids immediately."""
+    logger.info(
+        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s",
+        caller.user_id,
+        caller.facility_id,
+        caller.role,
+        caller.type,
+    )
     payloads = [
         UploadFilePayload(data=await f.read(), filename=f.filename) for f in files
     ]
@@ -67,8 +80,9 @@ async def analyze_dicom(
 def read_findings(
     finding_id: uuid.UUID,
     db: Session = Depends(get_db),
+    _caller: AccessTokenClaims | None = Depends(require_service_api_key_optional_user),
 ) -> FindingsDetailResponse:
-    """Poll until status is completed or failed."""
+    """Poll until status is completed or failed. Node worker: X-API-Key only."""
     try:
         return get_findings(db, finding_id)
     except FindingNotFoundError as exc:

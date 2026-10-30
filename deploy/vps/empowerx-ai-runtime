@@ -1,0 +1,108 @@
+#!/bin/bash
+# Application-user helper. Reads production env. Never downgrades the database.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+apply_security_posture
+load_config
+
+cmd="${1:-}"
+sha="${2:-}"
+
+test_mode_enabled() {
+  [[ "${EMPOWERX_AI_TEST_MODE:-}" == "1" ]] && ! production_mode
+}
+
+record_call() {
+  if test_mode_enabled; then
+    mkdir -p "$EMPOWERX_AI_STATE_DIR/stub-runtime"
+    printf '%s\n' "$*" >> "$EMPOWERX_AI_STATE_DIR/stub-runtime/calls"
+  fi
+}
+
+case "$cmd" in
+  check-migrations)
+    assert_sha "$sha" || die 2 "invalid commit sha"
+    record_call "check-migrations $sha"
+    if test_mode_enabled; then
+      if [[ -f "$EMPOWERX_AI_STATE_DIR/stub-runtime/migrations.out" ]]; then
+        cat "$EMPOWERX_AI_STATE_DIR/stub-runtime/migrations.out"
+      fi
+      rc="$(cat "$EMPOWERX_AI_STATE_DIR/stub-runtime/migrations.exit" 2>/dev/null || printf '%s' 0)"
+      exit "$rc"
+    fi
+    release="$EMPOWERX_AI_STATE_DIR/releases/$sha"
+    exec "$release/.venv/bin/python" "$ROOT/lib/migration_status.py" check \
+      --release "$release" \
+      --env-file "$EMPOWERX_AI_LIVE_DIR/.env"
+    ;;
+  check-database)
+    record_call "check-database"
+    if test_mode_enabled; then
+      mode="$(cat "$EMPOWERX_AI_STATE_DIR/stub-runtime/database-mode" 2>/dev/null || echo ok)"
+      phase="${EMPOWERX_AI_HEALTH_PHASE:-deploy}"
+      if [[ "$mode" == "fail-deploy" && "$phase" == "deploy" ]]; then
+        log "PostgreSQL connectivity check failed"
+        exit 1
+      fi
+      exit 0
+    fi
+    cd "$EMPOWERX_AI_LIVE_DIR"
+    "$EMPOWERX_AI_LIVE_DIR/.venv/bin/python" - <<'PY'
+import sys
+try:
+    from sqlalchemy import text
+    from app.infrastructure.database import engine
+    with engine.connect() as conn:
+        value = conn.execute(text("SELECT 1")).scalar()
+    if value != 1:
+        raise RuntimeError("probe")
+except SystemExit:
+    raise
+except Exception as exc:
+    sys.stderr.write("database connectivity check failed: {0}\n".format(type(exc).__name__))
+    raise SystemExit(1)
+PY
+    ;;
+  check-worker)
+    record_call "check-worker"
+    if test_mode_enabled; then
+      mode="$(cat "$EMPOWERX_AI_STATE_DIR/stub-runtime/worker-mode" 2>/dev/null || echo ok)"
+      phase="${EMPOWERX_AI_HEALTH_PHASE:-deploy}"
+      count_file="$EMPOWERX_AI_STATE_DIR/stub-runtime/worker-count"
+      n=0
+      [[ -f "$count_file" ]] && n="$(cat "$count_file")"
+      n=$((n + 1))
+      printf '%s\n' "$n" > "$count_file"
+      if [[ "$mode" == "fail-deploy" && "$phase" == "deploy" ]]; then
+        log "Celery worker check failed"
+        exit 1
+      fi
+      if [[ "$mode" == "fail-then-ok" && "$phase" == "deploy" ]]; then
+        fail_until="$(cat "$EMPOWERX_AI_STATE_DIR/stub-runtime/worker-fail-until" 2>/dev/null || echo 2)"
+        if [[ "$n" -le "$fail_until" ]]; then
+          log "Celery worker check failed"
+          exit 1
+        fi
+        exit 0
+      fi
+      exit 0
+    fi
+    cd "$EMPOWERX_AI_LIVE_DIR"
+    set +e
+    out="$("$EMPOWERX_AI_LIVE_DIR/.venv/bin/celery" -A app.workers.celery_app.celery_app inspect ping --timeout 15 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q "pong"; then
+      exit 0
+    fi
+    printf '%s\n' "$out" | redact_stream >&2
+    exit 1
+    ;;
+  *)
+    die 2 "unknown runtime command"
+    ;;
+esac

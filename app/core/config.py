@@ -65,6 +65,39 @@ class Settings(BaseSettings):
     max_dicom_files_per_request: int = Field(default=3, alias="MAX_DICOM_FILES_PER_REQUEST")
     max_dicom_file_size_mb: int = Field(default=10, alias="MAX_DICOM_FILE_SIZE_MB")
 
+    # --- Auth (EmpowerX Node → AI; names must match Node .env) ---
+    ai_service_key: str | None = Field(
+        default=None,
+        alias="AI_SERVICE_KEY",
+        description="Shared server-to-server key (X-API-Key). Never expose to browsers.",
+    )
+    jwt_access_secret: str | None = Field(
+        default=None,
+        alias="JWT_ACCESS_SECRET",
+        description="HS256 secret used by Node to sign access JWTs",
+    )
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+
+    # Comma-separated browser origins allowed by CORS
+    cors_origins: str = Field(
+        default=(
+            "https://devempowerx.io,"
+            "https://uatempowerx.io,"
+            "http://localhost:3001,"
+            "http://localhost:3000"
+        ),
+        alias="CORS_ORIGINS",
+    )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parsed CORS origins (no trailing slashes)."""
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
+
     @property
     def resolved_gemini_api_key(self) -> str | None:
         """Prefer GEMINI_API_KEY, fall back to GOOGLE_API_KEY."""

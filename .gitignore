@@ -37,3 +37,6 @@ uploads/
 # Local-only smoke tests / outputs (do not push)
 unit_testing/
 unit_testing_results/
+
+# Local virtualenv used by deploy/bin/run-local-checks.sh
+.tooling-venv/

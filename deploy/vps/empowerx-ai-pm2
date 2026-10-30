@@ -1,0 +1,94 @@
+#!/bin/bash
+# Root helper that reloads only the two EmpowerX AI PM2 processes.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+apply_security_posture
+
+for arg in "$@"; do
+  [[ "$arg" == "all" ]] && die 2 "refusing a command that targets every process"
+done
+
+if production_mode; then
+  load_config
+  PY="$EMPOWERX_AI_PYTHON"
+  ECOSYSTEM="/etc/empowerx-ai/ecosystem.config.cjs"
+  PM2_BIN="$(command -v pm2)"
+else
+  PY="${EMPOWERX_AI_PYTHON:-python3}"
+  ECOSYSTEM="${EMPOWERX_AI_ECOSYSTEM:-}"
+  PM2_BIN="${EMPOWERX_PM2:-pm2}"
+fi
+
+[[ -n "$PM2_BIN" && -n "$ECOSYSTEM" && -f "$ECOSYSTEM" ]] || die 4 "PM2 helper is not configured"
+[[ -x "$PY" || -x "$(command -v "$PY" || true)" ]] || die 4 "PM2 helper cannot run Python"
+
+run_pm2() {
+  log "pm2 $*"
+  "$PM2_BIN" "$@"
+}
+
+snapshot_protected() {
+  local dest="$1"
+  run_pm2 jlist | "$PY" -c '
+import json, sys
+names = ["empowerx-api", "empowerx-frontend", "empowerx-facility"]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.stderr.write("pm2 process list is unreadable\n")
+    raise SystemExit(1)
+found = {}
+if isinstance(data, dict):
+    data = data.get("processes", [])
+for proc in data:
+    name = proc.get("name")
+    if name in names:
+        found[name] = str(proc.get("pid") or "")
+for name in names:
+    pid = found.get(name, "")
+    if not pid or pid == "0":
+        sys.stderr.write("protected process is missing\n")
+        raise SystemExit(1)
+    sys.stdout.write("%s %s\n" % (name, pid))
+' > "$dest"
+}
+
+reload_ai() {
+  local before after name
+  before="$(mktemp)"
+  after="$(mktemp)"
+  snapshot_protected "$before"
+  for name in empowerx-ai-api empowerx-ai-worker; do
+    if run_pm2 describe "$name" >/dev/null 2>&1; then
+      run_pm2 delete "$name"
+    fi
+    run_pm2 start "$ECOSYSTEM" --only "$name"
+  done
+  run_pm2 save
+  snapshot_protected "$after"
+  if ! cmp -s "$before" "$after"; then
+    rm -f "$before" "$after"
+    die 9 "a protected PM2 process changed pid"
+  fi
+  rm -f "$before" "$after"
+  log "reloaded empowerx-ai-api and empowerx-ai-worker"
+}
+
+case "${1:-}" in
+  reload-ai)
+    [[ $# -eq 1 ]] || die 2 "usage: empowerx-ai-pm2 reload-ai"
+    reload_ai
+    ;;
+  status-ai)
+    [[ $# -eq 1 ]] || die 2 "usage: empowerx-ai-pm2 status-ai"
+    run_pm2 describe empowerx-ai-api
+    run_pm2 describe empowerx-ai-worker
+    ;;
+  *)
+    die 2 "unknown pm2 helper command"
+    ;;
+esac

@@ -2,8 +2,8 @@
 Radiology findings LLM (Gemini primary).
 
 Takes a preprocessed uint8 image + SafeDicomMetadata and returns a typed
-RadiologyReport. Fallback provider/model is reserved in config but not
-wired yet.
+RadiologyReport plus provider token usage. Fallback provider/model is
+reserved in config but not wired yet.
 
 Prompt text lives in prompts/findings.txt and must stay exact.
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ import numpy as np
 from PIL import Image
 
 from app.core.config import Settings, get_settings
-from app.modules.radiology.schemas import RadiologyReport, SafeDicomMetadata
+from app.modules.radiology.schemas import LlmTokenUsage, RadiologyReport, SafeDicomMetadata
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 FINDINGS_PROMPT_PATH = PROMPTS_DIR / "findings.txt"
@@ -34,9 +35,21 @@ USER_INSTRUCTION = (
 class FindingsLLMError(Exception):
     """Raised when the findings model call or JSON parse fails (permanent by default)."""
 
+    def __init__(self, message: str, *, usage: LlmTokenUsage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
+
 
 class FindingsLLMTransientError(FindingsLLMError):
     """Flaky provider/network — safe for Celery to retry."""
+
+
+@dataclass(slots=True)
+class FindingsLlmResult:
+    """Typed report plus token usage from one successful LLM call."""
+
+    report: RadiologyReport
+    usage: LlmTokenUsage
 
 
 def _is_transient_provider_error(exc: BaseException) -> bool:
@@ -82,12 +95,43 @@ def _is_transient_provider_error(exc: BaseException) -> bool:
     return any(n in msg for n in needles)
 
 
-def _raise_llm_call_error(exc: BaseException) -> None:
+def _raise_llm_call_error(
+    exc: BaseException,
+    *,
+    usage: LlmTokenUsage | None = None,
+) -> None:
     """Map a provider exception to transient vs permanent FindingsLLMError."""
     message = f"Gemini API call failed: {exc}"
     if _is_transient_provider_error(exc):
-        raise FindingsLLMTransientError(message) from exc
-    raise FindingsLLMError(message) from exc
+        raise FindingsLLMTransientError(message, usage=usage) from exc
+    raise FindingsLLMError(message, usage=usage) from exc
+
+
+def parse_gemini_usage_metadata(usage_metadata: Any, *, model: str) -> LlmTokenUsage:
+    """Map Gemini ``usage_metadata`` onto ``LlmTokenUsage`` (0s when absent)."""
+    if usage_metadata is None:
+        return LlmTokenUsage(llm_model=model)
+
+    def _int_field(*names: str) -> int:
+        for name in names:
+            raw = getattr(usage_metadata, name, None)
+            if raw is None and isinstance(usage_metadata, dict):
+                raw = usage_metadata.get(name)
+            if raw is not None:
+                try:
+                    return max(0, int(raw))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
+    return LlmTokenUsage(
+        llm_model=model,
+        input_tokens=_int_field("prompt_token_count"),
+        output_tokens=_int_field("candidates_token_count"),
+        reasoning_tokens=_int_field("thoughts_token_count"),
+        cached_input_tokens=_int_field("cached_content_token_count"),
+        total_tokens=_int_field("total_token_count"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,18 +262,19 @@ def _call_gemini(
     system_prompt: str,
     user_text: str,
     image: Image.Image,
-) -> str:
+) -> tuple[str, LlmTokenUsage]:
     """
     Call Gemini with system instruction + text + image.
 
-    Uses the current Google GenAI SDK (`google-genai`), not the deprecated
-    `google-generativeai` package.
+    Returns ``(response_text, token_usage)``. Uses the current Google GenAI
+    SDK (``google-genai``), not the deprecated ``google-generativeai`` package.
     """
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
     contents = [user_text, image]
+    usage = LlmTokenUsage(llm_model=model)
 
     try:
         response = client.models.generate_content(
@@ -243,7 +288,7 @@ def _call_gemini(
         )
     except Exception as first_exc:
         if _is_transient_provider_error(first_exc):
-            _raise_llm_call_error(first_exc)
+            _raise_llm_call_error(first_exc, usage=usage)
         # Some models reject response_mime_type — one local retry without it.
         try:
             response = client.models.generate_content(
@@ -255,13 +300,20 @@ def _call_gemini(
                 ),
             )
         except Exception as second_exc:
-            _raise_llm_call_error(second_exc)
+            _raise_llm_call_error(second_exc, usage=usage)
 
+    usage = parse_gemini_usage_metadata(
+        getattr(response, "usage_metadata", None),
+        model=model,
+    )
     text = getattr(response, "text", None)
     if not text:
         # Empty payload is often a flaky provider response — allow Celery retry.
-        raise FindingsLLMTransientError(f"Gemini returned empty content: {response!r}")
-    return text.strip()
+        raise FindingsLLMTransientError(
+            f"Gemini returned empty content: {response!r}",
+            usage=usage,
+        )
+    return text.strip(), usage
 
 
 def generate_findings_report(
@@ -269,7 +321,7 @@ def generate_findings_report(
     metadata: SafeDicomMetadata,
     *,
     settings: Settings | None = None,
-) -> RadiologyReport:
+) -> FindingsLlmResult:
     """
     Run findings LLM on a preprocessed image + safe metadata.
 
@@ -295,11 +347,15 @@ def generate_findings_report(
     user_text = build_user_text(metadata)
     image = image_u8_to_pil(image_u8)
 
-    raw = _call_gemini(
+    raw, usage = _call_gemini(
         model=cfg.llm_model,
         api_key=api_key,
         system_prompt=system_prompt,
         user_text=user_text,
         image=image,
     )
-    return parse_radiology_report(raw)
+    try:
+        report = parse_radiology_report(raw)
+    except FindingsLLMError as exc:
+        raise FindingsLLMError(str(exc), usage=usage) from exc
+    return FindingsLlmResult(report=report, usage=usage)

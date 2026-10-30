@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     llm_fallback_provider: str | None = None
     llm_fallback_model: str | None = None
 
+    # --- LLM token cost (USD per 1M tokens; human-approved, env-updated) ---
+    # Defaults match Gemini 3.6 Flash paid tier (through Dec 31, 2026 docs).
+    # Thinking/reasoning tokens are billed at the output rate.
+    gemini_input_price_per_million_usd: float = Field(
+        default=0.75,
+        alias="GEMINI_INPUT_PRICE_PER_MILLION_USD",
+    )
+    gemini_output_price_per_million_usd: float = Field(
+        default=3.75,
+        alias="GEMINI_OUTPUT_PRICE_PER_MILLION_USD",
+    )
+    gemini_cached_input_price_per_million_usd: float = Field(
+        default=0.075,
+        alias="GEMINI_CACHED_INPUT_PRICE_PER_MILLION_USD",
+    )
+
     # --- Postgres ---
     database_url: str = Field(
         default="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/empowerx",
@@ -102,6 +118,16 @@ class Settings(BaseSettings):
     def resolved_gemini_api_key(self) -> str | None:
         """Prefer GEMINI_API_KEY, fall back to GOOGLE_API_KEY."""
         return self.gemini_api_key or self.google_api_key
+
+    def gemini_token_cost_rates(self):
+        """Human-approved USD rates for Gemini token cost estimates."""
+        from app.modules.radiology.token_cost import TokenCostRates
+
+        return TokenCostRates.from_floats(
+            input_per_million_usd=self.gemini_input_price_per_million_usd,
+            output_per_million_usd=self.gemini_output_price_per_million_usd,
+            cached_input_per_million_usd=self.gemini_cached_input_price_per_million_usd,
+        )
 
     @property
     def resolved_celery_broker_url(self) -> str:

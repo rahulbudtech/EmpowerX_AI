@@ -15,6 +15,24 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class LlmTokenUsage(BaseModel):
+    """
+    Provider token counts for one LLM call (or a summed batch of calls).
+
+    Field names align with Gemini ``usage_metadata`` where applicable.
+    Reasoning/thinking tokens are stored separately for dashboards but
+    billed at the output rate (see ``token_cost.estimate_cost_usd``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    llm_model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_tokens: int = 0
+
 
 class WindowSource(str, Enum):
     """How display windowing was chosen during preprocessing."""

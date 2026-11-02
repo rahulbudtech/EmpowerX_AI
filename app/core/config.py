@@ -99,6 +99,7 @@ class Settings(BaseSettings):
         default=(
             "https://devempowerx.io,"
             "https://uatempowerx.io,"
+            "https://ai.uatempowerx.io,"
             "http://localhost:3001,"
             "http://localhost:3000"
         ),

@@ -43,11 +43,13 @@ Empowerx/
 │   │   ├── auth/               # Verify Node service key + access JWT
 │   │   ├── radiology/          # Domain logic (thin routes call here)
 │   │   │   ├── preprocess.py   # DICOM → uint8 X-ray + safe metadata
-│   │   │   ├── llm.py          # Gemini findings
+│   │   │   ├── llm.py          # Gemini findings + usage_metadata
+│   │   │   ├── token_cost.py   # Tokens → estimated USD (env rates)
+│   │   │   ├── upload_validation.py  # .dcm/.dicom + DICM content checks
 │   │   │   ├── service.py      # Enqueue + worker orchestration + retries
-│   │   │   ├── repository.py   # DB read/write
-│   │   │   ├── models.py       # ORM (radiology_findings)
-│   │   │   ├── schemas.py      # Pydantic request/response
+│   │   │   ├── repository.py   # DB read/write (findings + token usage)
+│   │   │   ├── models.py       # ORM (radiology_findings, radiology_token_usage)
+│   │   │   ├── schemas.py      # Pydantic request/response + LlmTokenUsage
 │   │   │   ├── storage.py      # Local upload + preprocessed PNG paths
 │   │   │   └── prompts/        # findings.txt (exact system prompt)
 │   │   ├── pathology/          # Scaffold only
@@ -111,6 +113,9 @@ cp .env.example .env
 |----------|---------|
 | `GEMINI_API_KEY` | Gemini access |
 | `LLM_MODEL` | Model id (e.g. `gemini-3.6-flash`) |
+| `GEMINI_INPUT_PRICE_PER_MILLION_USD` | USD per 1M input tokens (default `0.75`) |
+| `GEMINI_OUTPUT_PRICE_PER_MILLION_USD` | USD per 1M output tokens incl. thinking (default `3.75`) |
+| `GEMINI_CACHED_INPUT_PRICE_PER_MILLION_USD` | USD per 1M cached input tokens (default `0.075`) |
 | `DATABASE_URL` | Postgres SQLAlchemy URL |
 | `REDIS_URL` | Redis (Celery broker default) |
 | `UPLOAD_DIR` | Staged DICOM files (default `uploads`) |
@@ -164,24 +169,38 @@ Docker files (`*.dev` / `*.prod`) are **placeholders for DevOps** — not requir
 1. Load staged DICOM from `UPLOAD_DIR`
 2. Preprocess → grayscale uint8 + PHI-stripped metadata  
 3. Save PNG → `PREPROCESS_IMAGE_DIR/{finding_id}.png`
-4. Gemini → structured `RadiologyReport` JSON
+4. Gemini → structured `RadiologyReport` JSON + `usage_metadata`
 5. Persist to `radiology_findings` (Postgres)
+6. Best-effort upsert to `radiology_token_usage` (tokens + estimated USD cost)
 
-`case_id` is taken from DICOM **AccessionNumber** when present (not the upload folder UUID).
+`case_id` is taken from DICOM **AccessionNumber** when present (not the upload folder UUID).  
+Upload API accepts only `.dcm` / `.dicom` with a valid DICOM Part 10 (`DICM`) marker.
 
 ---
 
 ## Database notes
 
-Table: `radiology_findings`
+### `radiology_findings`
 
-Notable columns (some reserved for later wiring):
+One row per DICOM analyze job. Notable columns (some reserved for later wiring):
 
 - `report` — AI structured findings JSON  
 - `preprocess_image_url` — local PNG path (S3 later)  
 - `dicom_file_url` — reserved for DICOM S3 link  
 - `specialist_override_text` — reserved for full free-text specialist override  
 - `edited_report` / `edited_at` — reserved for structured specialist edits  
+
+### `radiology_token_usage`
+
+One row per finding job (`finding_id` unique FK). Written by the same radiology Celery worker (no separate queue). Counters accumulate across LLM retries.
+
+- `case_id` — DICOM-derived case id (for later dashboard grouping)  
+- `llm_model` — model that ran the call  
+- `input_tokens` / `output_tokens` / `reasoning_tokens` / `cached_input_tokens` / `total_tokens`  
+- `llm_calls` — provider call count for this job  
+- `estimated_cost_usd` — snapshot from env rates (`token_cost.py`; thinking billed at output rate)  
+
+Usage upsert failures are logged only and never fail the analyze job. Usage HTTP API is not wired yet.
 
 ---
 

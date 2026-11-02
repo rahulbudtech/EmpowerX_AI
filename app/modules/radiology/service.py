@@ -24,6 +24,7 @@ from app.modules.radiology.llm import (
 from app.modules.radiology.preprocess import (
     DicomPreprocessError,
     PreprocessResult,
+    collect_missing_dicom_fields,
     preprocess_dicom_bytes,
     preprocess_dicom_path,
 )
@@ -443,8 +444,15 @@ def _run_findings(pre: PreprocessResult, *, settings: Settings) -> AnalyzeResult
     except FindingsLLMError as exc:
         raise PermanentPipelineError(str(exc), token_usage=exc.usage) from exc
 
+    # System-filled after LLM — never trust model output for this key.
+    report = llm_result.report.model_copy(
+        update={
+            "missing_dicom_fields": collect_missing_dicom_fields(pre.metadata),
+        }
+    )
+
     return AnalyzeResult(
-        report=llm_result.report,
+        report=report,
         metadata=pre.metadata,
         preprocess=pre,
         provider=settings.llm_provider,

@@ -181,6 +181,8 @@ def build_dicom_metadata_block(meta: SafeDicomMetadata) -> dict[str, Any]:
         "view_position": derive_view_position(meta),
         "exposure_quality": "Undetermined",
         "quality_notes": None,
+        "patient_sex": meta.patient_sex,
+        "patient_birth_date": meta.patient_birth_date,
         "modality": meta.modality,
         "body_part_examined": meta.body_part_examined,
         "protocol_name": meta.protocol_name,

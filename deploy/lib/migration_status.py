@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DUMP_TABLES = ("radiology_findings", "alembic_version")
+DUMP_TABLES = ("radiology_findings", "radiology_token_usage", "alembic_version")
 
 
 def load_env_file(path: Path) -> dict[str, str]:

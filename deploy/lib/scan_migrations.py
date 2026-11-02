@@ -7,7 +7,7 @@ import re
 import sys
 from pathlib import Path
 
-ALLOWED_TABLES = {"radiology_findings", "alembic_version"}
+ALLOWED_TABLES = {"radiology_findings", "radiology_token_usage", "alembic_version"}
 OPERATION_RE = re.compile(
     r"op\.(drop_table|drop_column|alter_column|add_column|create_table|rename_table)"
     r"\s*\(\s*[\"']([A-Za-z0-9_\.]+)[\"']",

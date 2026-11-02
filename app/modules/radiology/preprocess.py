@@ -94,6 +94,22 @@ def _safe_str(value: Any) -> str | None:
     return text or None
 
 
+def resolve_patient_sex(ds: Dataset) -> str | None:
+    """Normalize PatientSex to M / F / O when present."""
+    raw = _safe_str(ds.get("PatientSex"))
+    if not raw:
+        return None
+    code = raw.upper()[:1]
+    if code in {"M", "F", "O"}:
+        return code
+    return raw.upper()
+
+
+def resolve_patient_birth_date(ds: Dataset) -> str | None:
+    """Pass PatientBirthDate through as DICOM DA text (YYYYMMDD); no derivation."""
+    return _safe_str(ds.get("PatientBirthDate"))
+
+
 def _load_dataset_from_path(path: Path) -> Dataset:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -340,6 +356,8 @@ def extract_safe_metadata(
     return SafeDicomMetadata(
         case_id=case_id,
         source_file=source_name,
+        patient_sex=resolve_patient_sex(ds),
+        patient_birth_date=resolve_patient_birth_date(ds),
         modality=_safe_str(ds.get("Modality")),
         body_part_examined=_safe_str(ds.get("BodyPartExamined")),
         protocol_name=_safe_str(ds.get("ProtocolName")),
@@ -369,6 +387,49 @@ def extract_safe_metadata(
         sop_instance_uid=_safe_str(ds.get("SOPInstanceUID")),
         preprocessing=process_info,
     )
+
+
+# Specialist-facing keys checked for missing_dicom_fields (stable UI order).
+IMPORTANT_DICOM_FIELDS: tuple[str, ...] = (
+    "case_id",
+    "patient_sex",
+    "patient_birth_date",
+    "modality",
+    "body_part_examined",
+    "protocol_name",
+    "study_description",
+    "series_description",
+    "image_type",
+    "rows",
+    "columns",
+    "pixel_spacing_mm",
+    "kvp",
+    "exposure",
+    "manufacturer",
+)
+
+
+def _is_missing_dicom_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, (list, tuple)) and len(value) == 0:
+        return True
+    return False
+
+
+def collect_missing_dicom_fields(metadata: SafeDicomMetadata) -> list[str]:
+    """
+    Names of important metadata fields that are null/empty.
+
+    Empty list means nothing important is missing. Appended to the findings
+    report by the service (not produced by the LLM).
+    """
+    data = metadata.model_dump()
+    return [
+        key for key in IMPORTANT_DICOM_FIELDS if _is_missing_dicom_value(data.get(key))
+    ]
 
 
 def _build_result(

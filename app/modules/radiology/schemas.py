@@ -15,6 +15,24 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class LlmTokenUsage(BaseModel):
+    """
+    Provider token counts for one LLM call (or a summed batch of calls).
+
+    Field names align with Gemini ``usage_metadata`` where applicable.
+    Reasoning/thinking tokens are stored separately for dashboards but
+    billed at the output rate (see ``token_cost.estimate_cost_usd``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    llm_model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_tokens: int = 0
+
 
 class WindowSource(str, Enum):
     """How display windowing was chosen during preprocessing."""
@@ -53,14 +71,18 @@ class SafeDicomMetadata(BaseModel):
     """
     De-identified DICOM sidecar metadata.
 
-    Intentionally excludes PHI (patient name, ID, birth date, accession,
-    institution, etc.). UIDs are optional for local tracing only.
+    Intentionally excludes direct identifiers (patient name, ID, accession,
+    institution, etc.). Sex and birth date may be kept for clinical LLM context.
+    UIDs are optional for local tracing only.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     case_id: str | None = None
     source_file: str | None = None
+    # Clinical context for findings LLM (not name / ID).
+    patient_sex: str | None = None
+    patient_birth_date: str | None = None  # DICOM DA as-is (YYYYMMDD); not derived
     modality: str | None = None
     body_part_examined: str | None = None
     protocol_name: str | None = None
@@ -87,17 +109,19 @@ class SafeDicomMetadata(BaseModel):
     preprocessing: PreprocessingInfo
     phi_stripped: bool = True
     note: str = (
-        "Patient identity fields (name, ID, birth date, accession, institution, etc.) "
-        "are intentionally excluded from this sidecar."
+        "Patient name, ID, accession, institution, etc. are excluded. "
+        "Sex and birth date may be retained for clinical context."
     )
 
     def to_llm_safe_dict(self) -> dict[str, Any]:
         """
-        Subset useful for LLM context: technical tags only, no UIDs / filenames.
+        Subset useful for LLM context: technical + sex/birth date, no UIDs / filenames.
 
         Keeps a trimmed preprocessing block (window + photometric).
         """
         keep_keys = [
+            "patient_sex",
+            "patient_birth_date",
             "modality",
             "body_part_examined",
             "protocol_name",
@@ -196,13 +220,14 @@ class RecommendationItem(BaseModel):
 
 class RadiologyReport(BaseModel):
     """
-    Structured JSON report returned by the findings LLM.
+    Structured findings report (LLM body + system-filled missing DICOM fields).
 
     Canonical key order (API + DB storage):
       1. technical_metadata
       2. findings
       3. clinical_impression
       4. recommendations
+      5. missing_dicom_fields  (backend-filled; empty list if nothing missing)
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -211,6 +236,8 @@ class RadiologyReport(BaseModel):
     findings: list[FindingItem] = Field(default_factory=list)
     clinical_impression: ClinicalImpression | None = None
     recommendations: list[RecommendationItem] = Field(default_factory=list)
+    # Always set by service after LLM — not trusted from model output.
+    missing_dicom_fields: list[str] = Field(default_factory=list)
 
     def to_storage_dict(self) -> dict[str, Any]:
         """Serialize with fixed top-level key order for DB / API payloads."""
@@ -220,6 +247,7 @@ class RadiologyReport(BaseModel):
             "findings": data["findings"],
             "clinical_impression": data["clinical_impression"],
             "recommendations": data["recommendations"],
+            "missing_dicom_fields": data["missing_dicom_fields"],
         }
 
 

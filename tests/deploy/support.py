@@ -74,7 +74,13 @@ def application_files(version: str, migration: str | None = None) -> list[tuple[
     return [regular(name, data) for name, data in files.items()]
 
 
-def bundle_bytes(commit: str, version: str, migration: str | None = None, inner: bytes | None = None) -> tuple[bytes, str]:
+def bundle_bytes(
+    commit: str,
+    version: str,
+    migration: str | None = None,
+    inner: bytes | None = None,
+    branch: str = "bud_staging",
+) -> tuple[bytes, str]:
     if inner is None:
         members = application_files(version, migration)
         infos = []
@@ -87,7 +93,7 @@ def bundle_bytes(commit: str, version: str, migration: str | None = None, inner:
     manifest = (
         f"commit={commit}\n"
         f"archive_sha256={inner_sha}\n"
-        "branch=bud_development\n"
+        f"branch={branch}\n"
         "created_at=2026-10-26T00:00:00Z\n"
     ).encode()
     manifest_info, _ = regular("manifest.txt", manifest)
@@ -99,8 +105,15 @@ def bundle_bytes(commit: str, version: str, migration: str | None = None, inner:
     return outer, hashlib.sha256(outer).hexdigest()
 
 
-def stage_bundle(state: Path, commit: str, version: str, migration: str | None = None, inner: bytes | None = None) -> None:
-    payload, digest = bundle_bytes(commit, version, migration, inner)
+def stage_bundle(
+    state: Path,
+    commit: str,
+    version: str,
+    migration: str | None = None,
+    inner: bytes | None = None,
+    branch: str = "bud_staging",
+) -> None:
+    payload, digest = bundle_bytes(commit, version, migration, inner, branch=branch)
     incoming = state / "incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     (incoming / f"{commit}.tar.gz").write_bytes(payload)

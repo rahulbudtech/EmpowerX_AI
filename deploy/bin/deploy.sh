@@ -10,9 +10,8 @@ source "$ROOT/lib/common.sh"
 source "$ROOT/lib/release.sh"
 
 SHA="${1:-}"
-MIGRATE="no"
 if [[ "${2:-}" == "migrate=yes" ]]; then
-  MIGRATE="yes"
+  log "migrate=yes is no longer required; pending forward migrations are applied automatically"
 elif [[ -n "${2:-}" ]]; then
   die 2 "unknown deploy argument"
 fi
@@ -58,14 +57,9 @@ if ! "$py" "$ROOT/lib/validate_archive.py" deploy-bundle \
   --checksum "$outer" \
   --expected-commit "$SHA" \
   --dest "$dest" \
-  --require-branch bud_development; then
+  --require-branch bud_staging; then
   safe_rm_release "$dest" || true
   die 3 "deployment artifact was rejected"
-fi
-
-if ! "$py" "$ROOT/lib/scan_migrations.py" "$dest/migrations"; then
-  safe_rm_release "$dest" || true
-  die 6 "migration scan failed"
 fi
 
 if ! build_release "$dest"; then
@@ -81,20 +75,19 @@ printf '%s\n' "$mig_out" | while IFS= read -r line; do
   [[ -n "$line" ]] && log "migration: $line"
 done
 
-if [[ "$mig_rc" -eq 10 ]]; then
-  if [[ "$MIGRATE" != "yes" ]]; then
-    safe_rm_release "$dest" || true
-    die 6 "pending migrations require explicit approval"
-  fi
+MIGRATED=0
+if [[ "$mig_rc" -eq 0 ]]; then
+  log "no pending migrations"
+elif [[ "$mig_rc" -eq 10 ]]; then
+  log "applying pending forward migrations"
   if ! invoke_migrate apply "$SHA"; then
     safe_rm_release "$dest" || true
-    die 6 "approved migration was not applied"
+    die 6 "migration execution failed"
   fi
-elif [[ "$mig_rc" -ne 0 ]]; then
-  safe_rm_release "$dest" || true
-  die 6 "could not determine migration status"
+  MIGRATED=1
 else
-  log "no pending migrations"
+  safe_rm_release "$dest" || true
+  die 6 "migration execution failed"
 fi
 
 ROLLBACK_SHA="$(read_state current || true)"
@@ -110,6 +103,14 @@ do_rollback() {
   EMPOWERX_AI_HEALTH_PHASE=rollback "$ROOT/bin/healthcheck.sh"
 }
 
+rollback_note() {
+  if [[ "$MIGRATED" == "1" ]]; then
+    log "application code rolled back to $ROLLBACK_SHA; database schema was not reverted"
+  else
+    log "rolled back to $ROLLBACK_SHA"
+  fi
+}
+
 activate_rc=0
 set +e
 invoke_activate switch "$SHA"
@@ -123,7 +124,7 @@ fi
 if [[ "$activate_rc" -ne 0 ]]; then
   if [[ "$ACTIVATED" == "1" ]]; then
     if do_rollback; then
-      log "rolled back to $ROLLBACK_SHA"
+      rollback_note
       exit 8
     fi
     die 9 "rollback failed after activation error"
@@ -131,9 +132,22 @@ if [[ "$activate_rc" -ne 0 ]]; then
   die 7 "activation failed"
 fi
 
+app_target="$(readlink "$EMPOWERX_AI_LIVE_DIR/app" || true)"
+case "$app_target" in
+  *"$SHA"*) ;;
+  *)
+    log "live application is not the deployed release"
+    if do_rollback; then
+      rollback_note
+      exit 8
+    fi
+    die 9 "rollback failed after activation error"
+    ;;
+esac
+
 if ! invoke_pm2 reload-ai; then
   if do_rollback; then
-    log "rolled back to $ROLLBACK_SHA after process reload failure"
+    rollback_note
     exit 8
   fi
   die 9 "rollback failed after process reload error"
@@ -146,7 +160,7 @@ set -e
 if [[ "$health_rc" -ne 0 ]]; then
   log "health verification failed"
   if do_rollback; then
-    log "rolled back to $ROLLBACK_SHA"
+    rollback_note
     exit 8
   fi
   die 9 "rollback failed after health verification"
@@ -157,5 +171,6 @@ if [[ -n "$ROLLBACK_SHA" && "$ROLLBACK_SHA" != "$SHA" ]]; then
 fi
 write_state current "$SHA"
 prune_releases || true
+log "API and Celery worker are running release $SHA"
 log "deploy succeeded $SHA"
 exit 0

@@ -50,10 +50,5 @@ log "uploading $SHA"
   cat "$artifact"
 } | ssh_exec "receive-artifact $SHA"
 
-if [[ "${EMPOWERX_AI_ALLOW_MIGRATIONS:-}" == "yes" ]]; then
-  log "remote deploy $SHA with migration approval flag"
-  ssh_exec "deploy $SHA migrate=yes"
-else
-  log "remote deploy $SHA"
-  ssh_exec "deploy $SHA"
-fi
+log "remote deploy $SHA"
+ssh_exec "deploy $SHA"

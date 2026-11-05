@@ -22,15 +22,18 @@ if [[ -z "$OUT" ]]; then
 fi
 mkdir -p "$(dirname "$OUT")"
 
-if [[ -n "${GITHUB_REF:-}" ]]; then
-  case "$GITHUB_REF" in
-    refs/heads/bud_development) BRANCH="bud_development" ;;
-    *) BRANCH="${GITHUB_REF#refs/heads/}" ;;
-  esac
-elif git -C "$REPO" symbolic-ref -q HEAD >/dev/null 2>&1; then
-  BRANCH="$(git -C "$REPO" symbolic-ref --short HEAD)"
+if [[ -n "${GITHUB_REF_NAME:-}" ]]; then
+  BRANCH="$GITHUB_REF_NAME"
+elif [[ "${GITHUB_REF:-}" == refs/heads/* ]]; then
+  BRANCH="${GITHUB_REF#refs/heads/}"
 else
-  BRANCH="detached"
+  BRANCH="$(git -C "$REPO" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [[ -z "$BRANCH" ]]; then
+    BRANCH="$(git -C "$REPO" branch --show-current 2>/dev/null || true)"
+  fi
+  if [[ -z "$BRANCH" ]]; then
+    BRANCH="detached"
+  fi
 fi
 
 workdir="$(mktemp -d)"
@@ -65,5 +68,5 @@ if ! "$py" "$ROOT/lib/validate_archive.py" deploy-bundle \
   die 3 "packaged artifact failed validation"
 fi
 rm -rf "$verify"
-log "packaged $SHA"
+log "packaged $SHA branch=$BRANCH"
 printf '%s\n' "$OUT"

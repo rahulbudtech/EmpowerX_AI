@@ -10,13 +10,14 @@ source "$ROOT_DEFAULT/lib/common.sh"
 BUNDLE=""
 PUBKEY=""
 DRY_RUN=0
+SCRIPTS_ONLY=0
 LIVE_DIR="/var/www/empowerx/EmpowerX-AI"
 STATE_DIR="/var/lib/empowerx-ai"
 BASELINE_SHA="8238ab968840be4530458e7cabfc508391906dc4"
 MANAGED_PY="/opt/empowerx-ai/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12"
 
 usage() {
-  printf '%s\n' "usage: install.sh --bundle DIR --pubkey FILE [--baseline-sha SHA] [--dry-run]"
+  printf '%s\n' "usage: install.sh --bundle DIR [--pubkey FILE] [--scripts-only] [--baseline-sha SHA] [--dry-run]"
   exit 2
 }
 
@@ -28,11 +29,15 @@ while [[ $# -gt 0 ]]; do
     --live-dir) LIVE_DIR="${2:-}"; shift 2 ;;
     --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --scripts-only) SCRIPTS_ONLY=1; shift ;;
     *) usage ;;
   esac
 done
 
-[[ -n "$BUNDLE" && -n "$PUBKEY" ]] || usage
+[[ -n "$BUNDLE" ]] || usage
+if [[ "$SCRIPTS_ONLY" -eq 0 && -z "$PUBKEY" ]]; then
+  usage
+fi
 if [[ "$DRY_RUN" -ne 1 && "$(id -u)" -ne 0 ]]; then
   die 1 "installer must run as root"
 fi
@@ -65,14 +70,16 @@ for rel in $required; do
   [[ -f "$BUNDLE/$rel" ]] || die 4 "bundle is missing $rel"
 done
 
-if grep -q "PRIVATE KEY" "$PUBKEY"; then
-  die 4 "refusing a private key"
+if [[ "$SCRIPTS_ONLY" -eq 0 ]]; then
+  if grep -q "PRIVATE KEY" "$PUBKEY"; then
+    die 4 "refusing a private key"
+  fi
+  pub="$(awk 'NF && $1 !~ /^#/ {print; exit}' "$PUBKEY")"
+  case "$pub" in
+    ssh-ed25519\ AAAA*|ssh-rsa\ AAAA*|ecdsa-sha2-nistp256\ AAAA*) ;;
+    *) die 4 "unsupported public key" ;;
+  esac
 fi
-pub="$(awk 'NF && $1 !~ /^#/ {print; exit}' "$PUBKEY")"
-case "$pub" in
-  ssh-ed25519\ AAAA*|ssh-rsa\ AAAA*|ecdsa-sha2-nistp256\ AAAA*) ;;
-  *) die 4 "unsupported public key" ;;
-esac
 if grep -q "requiretty" "$BUNDLE/vps/sudoers-empowerx-ai-deploy"; then
   die 4 "sudoers file contains unsupported requiretty"
 fi
@@ -80,9 +87,56 @@ visudo -c -f "$BUNDLE/vps/sudoers-empowerx-ai-deploy" >/dev/null
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry-run: no system changes"
+  if [[ "$SCRIPTS_ONLY" -eq 1 ]]; then
+    log "would update installed deploy scripts from $BUNDLE"
+    log "would leave live runtime, .env, releases, and PM2 processes unchanged"
+    exit 0
+  fi
   log "would create user empowerx-ai-deploy and install restricted SSH key"
   log "would install helpers under /usr/local/lib/empowerx-ai and /usr/local/sbin"
   log "would record baseline $BASELINE_SHA from $LIVE_DIR"
+  exit 0
+fi
+
+install_deploy_scripts() {
+  install -d -m 0755 /usr/local/lib/empowerx-ai /etc/empowerx-ai
+  rm -rf /usr/local/lib/empowerx-ai/deploy
+  mkdir -p /usr/local/lib/empowerx-ai/deploy
+  cp -R "$BUNDLE/bin" "$BUNDLE/lib" "$BUNDLE/vps" /usr/local/lib/empowerx-ai/deploy/
+  chown -R root:root /usr/local/lib/empowerx-ai/deploy
+  find /usr/local/lib/empowerx-ai/deploy -type d -exec chmod 755 {} +
+  find /usr/local/lib/empowerx-ai/deploy -type f -exec chmod 644 {} +
+  find /usr/local/lib/empowerx-ai/deploy -type f \( -name '*.sh' -o -name 'empowerx-ai-*' \) -exec chmod 755 {} +
+
+  write_wrapper() {
+    local name="$1"
+    cat > "/usr/local/sbin/$name" <<EOF
+#!/bin/bash
+set -euo pipefail
+exec /usr/local/lib/empowerx-ai/deploy/vps/$name "\$@"
+EOF
+    chown root:root "/usr/local/sbin/$name"
+    chmod 755 "/usr/local/sbin/$name"
+  }
+  write_wrapper empowerx-ai-deploy-shell
+  write_wrapper empowerx-ai-pm2
+  write_wrapper empowerx-ai-activate
+  write_wrapper empowerx-ai-runtime
+  write_wrapper empowerx-ai-migrate
+
+  tmp_sudo="$(mktemp)"
+  cp "$BUNDLE/vps/sudoers-empowerx-ai-deploy" "$tmp_sudo"
+  visudo -c -f "$tmp_sudo" >/dev/null
+  install -m 440 -o root -g root "$tmp_sudo" /etc/sudoers.d/empowerx-ai-deploy
+  rm -f "$tmp_sudo"
+  visudo -c >/dev/null
+  install -m 644 -o root -g root "$BUNDLE/vps/ecosystem.config.cjs" /etc/empowerx-ai/ecosystem.config.cjs
+}
+
+if [[ "$SCRIPTS_ONLY" -eq 1 ]]; then
+  install_deploy_scripts
+  log "updated installed deploy scripts from $BUNDLE"
+  log "live runtime, .env, releases, and PM2 processes were left unchanged"
   exit 0
 fi
 
@@ -147,39 +201,7 @@ if sudo -u empowerx-ai-deploy test -r "$LIVE_DIR/.env"; then
   die 4 "deploy user can read the production env file"
 fi
 
-install -d -m 0755 /usr/local/lib/empowerx-ai /etc/empowerx-ai /var/log/empowerx-ai
-rm -rf /usr/local/lib/empowerx-ai/deploy
-mkdir -p /usr/local/lib/empowerx-ai/deploy
-cp -R "$BUNDLE/bin" "$BUNDLE/lib" "$BUNDLE/vps" /usr/local/lib/empowerx-ai/deploy/
-chown -R root:root /usr/local/lib/empowerx-ai/deploy
-find /usr/local/lib/empowerx-ai/deploy -type d -exec chmod 755 {} +
-find /usr/local/lib/empowerx-ai/deploy -type f -exec chmod 644 {} +
-find /usr/local/lib/empowerx-ai/deploy -type f \( -name '*.sh' -o -name 'empowerx-ai-*' \) -exec chmod 755 {} +
-
-write_wrapper() {
-  local name="$1"
-  cat > "/usr/local/sbin/$name" <<EOF
-#!/bin/bash
-set -euo pipefail
-exec /usr/local/lib/empowerx-ai/deploy/vps/$name "\$@"
-EOF
-  chown root:root "/usr/local/sbin/$name"
-  chmod 755 "/usr/local/sbin/$name"
-}
-write_wrapper empowerx-ai-deploy-shell
-write_wrapper empowerx-ai-pm2
-write_wrapper empowerx-ai-activate
-write_wrapper empowerx-ai-runtime
-write_wrapper empowerx-ai-migrate
-
-tmp_sudo="$(mktemp)"
-cp "$BUNDLE/vps/sudoers-empowerx-ai-deploy" "$tmp_sudo"
-visudo -c -f "$tmp_sudo" >/dev/null
-install -m 440 -o root -g root "$tmp_sudo" /etc/sudoers.d/empowerx-ai-deploy
-rm -f "$tmp_sudo"
-visudo -c >/dev/null
-
-install -m 644 -o root -g root "$BUNDLE/vps/ecosystem.config.cjs" /etc/empowerx-ai/ecosystem.config.cjs
+install_deploy_scripts
 cat > /etc/empowerx-ai/deploy.env <<EOF
 EMPOWERX_AI_LIVE_DIR=$LIVE_DIR
 EMPOWERX_AI_STATE_DIR=$STATE_DIR

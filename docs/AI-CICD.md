@@ -5,15 +5,15 @@ This repository deploys only the EmpowerX AI API and Celery worker. The Hostinge
 ## Architecture
 
 ```text
-pull request -> bud_development
+pull request -> bud_staging
         |
         v
 GitHub Actions validate job
   Python 3.12, dependency install, compile, import, deployment tests
         |
-        | merge
+        | merge / push
         v
-push to bud_development
+push to bud_staging
         |
         v
 GitHub Actions deploy job
@@ -24,9 +24,8 @@ GitHub Actions deploy job
         v
 /var/lib/empowerx-ai/releases/<sha>
   extract, reject unsafe paths, build a new virtualenv with managed Python 3.12
-  scan Alembic files
   if the database is already at head: continue
-  if migrations are pending: stop unless both approval gates are set
+  if migrations are pending: run alembic upgrade head once
         |
         v
 /var/www/empowerx/EmpowerX-AI
@@ -79,24 +78,24 @@ The deploy user is `empowerx-ai-deploy`. It is not the runtime user `empowerx-ai
 
 ## Branch and pull request workflow
 
-`bud_development` is the development and deployment branch. It was created from `development` at `8238ab968840be4530458e7cabfc508391906dc4`, which is also the current production checkout. `main`, `development`, and `production` are left in place.
+`bud_staging` is the only staging deployment branch. Other branches do not deploy to srv2028039. `main`, `development`, and `production` are left in place.
 
-1. Create a feature branch from `bud_development`.
-2. Open a pull request into `bud_development`.
+1. Create a feature branch from `bud_staging`.
+2. Open a pull request into `bud_staging`.
 3. GitHub Actions runs the validate job. That job has `contents: read` and no deployment environment, so it cannot read the VPS secrets.
 4. After review, merge the pull request. The merge push runs validate again and then the deploy job.
-5. Do not merge the CI/CD pull request until the VPS account and GitHub environment below are in place. A merge is a production deploy.
+5. A direct push to `bud_staging` also validates and deploys.
 
-Make `bud_development` the GitHub default branch so new pull requests target it:
+Make `bud_staging` the GitHub default branch so new pull requests target it:
 
 1. Open `https://github.com/rahulbudtech/EmpowerX_AI/settings`.
-2. Under **Default branch**, switch the branch to `bud_development`.
+2. Under **Default branch**, switch the branch to `bud_staging`.
 3. Confirm. Do not delete `main`, `development`, or `production`.
 
 If `gh` is authenticated with permission to administer the repository, the same change is:
 
 ```bash
-gh repo edit rahulbudtech/EmpowerX_AI --default-branch bud_development
+gh repo edit rahulbudtech/EmpowerX_AI --default-branch bud_staging
 ```
 
 ## GitHub environment
@@ -121,7 +120,6 @@ Do not add required reviewers if a merge should deploy immediately. Required rev
 | `VPS_HOST` | `srv2028039.hstgr.cloud` |
 | `VPS_USER` | `empowerx-ai-deploy` |
 | `VPS_PORT` | `22` |
-| `EMPOWERX_AI_ALLOW_MIGRATIONS` | Leave unset. Set to `yes` only for a reviewed schema change, then clear it. |
 
 The workflow uses `vars.*` for the host settings and `secrets.*` for the key and known hosts. It does not use a personal access token.
 
@@ -145,11 +143,11 @@ scp -P 22 ~/.ssh/empowerx_ai_deploy.pub root@srv2028039.hstgr.cloud:/root/empowe
 
 ## One-time Hostinger installation
 
-Run this from a checkout of the CI/CD branch before that branch is merged. `bud_development` does not contain these files until the merge.
+Run this from a checkout of `bud_staging`.
 
 ```bash
 git fetch origin
-git checkout feature/ai-cicd
+git checkout bud_staging
 tar -C deploy -czf /tmp/empowerx-ai-cicd-bundle.tar.gz bin lib vps
 scp -P 22 /tmp/empowerx-ai-cicd-bundle.tar.gz root@srv2028039.hstgr.cloud:/root/empowerx-ai-cicd-bundle.tar.gz
 ```
@@ -236,7 +234,7 @@ ssh -i ~/.ssh/empowerx_ai_deploy \
 
 After the installer, the GitHub environment, and the SSH check:
 
-1. Merge the reviewed CI/CD pull request into `bud_development`.
+1. Merge the reviewed CI/CD pull request into `bud_staging`.
 2. The push runs validation, then the deploy job.
 3. The job packages `github.sha`, uploads it, and runs `deploy <sha>` on the VPS.
 4. The first activation moves the existing virtualenv to `/var/lib/empowerx-ai/venvs/baseline` and links the live `.venv` at that path before switching it to the new release. The API keeps a working interpreter path during the move.
@@ -247,7 +245,7 @@ Watch the run at `https://github.com/rahulbudtech/EmpowerX_AI/actions`.
 
 ## Normal deployments
 
-1. Open a pull request into `bud_development`.
+1. Open a pull request into `bud_staging`.
 2. Wait for the validate job.
 3. Merge.
 4. The deploy job packages that merge commit and activates it.
@@ -309,39 +307,22 @@ Common failures:
 | 3 | The bundle is missing, truncated, or rejected. |
 | 4 | Configuration, permissions, or disk space blocked the deploy. |
 | 5 | Python 3.12 virtualenv or dependency installation failed. The live tree was not switched. |
-| 6 | Migration status could not be read, or a schema change was not approved. |
+| 6 | Migration status could not be read, or `alembic upgrade head` failed. |
 | 8 | The new release was activated, health failed, and the previous release is back in service. |
 | 9 | Health failed and the automatic rollback also failed. Restore `state/current` manually. |
 
-## Production migration safety
+## Staging migration handling
 
-EmpowerX AI and the Node.js backend share the PostgreSQL database `empowerx`. The five AI revisions through `20260424_0005` are already applied. A normal code deploy runs `check` only. It does not run `upgrade`.
+EmpowerX AI and the Node.js backend share the PostgreSQL database `empowerx`. A staging deploy checks Alembic status, then:
 
-Pending revisions stop the deploy before the live tree changes. Two independent approvals are required:
+- skips migrations when the database is already at head
+- runs `alembic upgrade head` once when revisions are pending
+- fails the deploy before activation if migration execution fails
+- never runs a database downgrade and never drops or resets the database
 
-1. On the VPS, as root, write the exact incoming Alembic head:
+The migrate helper dumps the AI tables (`radiology_findings`, `radiology_token_usage`, `alembic_version`) before a forward upgrade. Code rollback does not restore that dump and does not run `pg_restore`. Restoring a dump is a separate, manual decision because it would rewrite rows in the shared database.
 
-```bash
-printf '%s\n' "20260424_0006" > /etc/empowerx-ai/allow-migrations
-chmod 644 /etc/empowerx-ai/allow-migrations
-```
-
-Replace the revision with the head printed by the failed deploy log.
-
-2. In the GitHub `development` environment, set `EMPOWERX_AI_ALLOW_MIGRATIONS` to `yes`.
-
-Re-run the failed deploy job. The migrate helper:
-
-- refuses a head that does not match the approval file
-- refuses an `alembic_version` row that belongs to another application
-- runs `pg_dump` of only `radiology_findings` and `alembic_version`
-- stores that dump at `/var/lib/empowerx-ai/backups/migrations/`, mode `600`, owner `root`
-- runs `alembic upgrade head`
-- renames the approval file so it cannot be reused
-
-Clear `EMPOWERX_AI_ALLOW_MIGRATIONS` after the job. Code rollback does not run `alembic downgrade` and does not run `pg_restore`. Restoring a dump is a separate, manual decision because it would rewrite rows in the shared database.
-
-The migration scanner rejects revisions that drop, truncate, delete, or alter a table other than `radiology_findings` or `alembic_version`. That scan runs in pull-request validation and again on the server before a build is activated.
+CI scans `upgrade()` operations so a migration that targets a non-AI table is rejected before packaging. `downgrade()` is ignored because forward deploys do not execute it.
 
 ## Verify the domain and the worker
 

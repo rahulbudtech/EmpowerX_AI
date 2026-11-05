@@ -189,8 +189,15 @@ def deploy_bundle(
         manifest = _read_manifest(outer_tmp / "manifest.txt")
         if manifest["commit"] != expected_commit:
             raise ArchiveRejected("commit does not match artifact")
-        if require_branch and manifest["branch"] != require_branch:
-            raise ArchiveRejected("artifact branch is not deployable")
+        if require_branch:
+            allowed = {part.strip() for part in require_branch.split(",") if part.strip()}
+            if manifest["branch"] not in allowed:
+                raise ArchiveRejected(
+                    "artifact branch is not deployable (got {0}, required {1})".format(
+                        manifest["branch"],
+                        ",".join(sorted(allowed)),
+                    )
+                )
         inner = outer_tmp / "source.tar.gz"
         inner_sha = sha256_file(inner)
         if not hmac.compare_digest(inner_sha, manifest["archive_sha256"]):

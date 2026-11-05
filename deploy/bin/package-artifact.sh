@@ -22,7 +22,9 @@ if [[ -z "$OUT" ]]; then
 fi
 mkdir -p "$(dirname "$OUT")"
 
-if [[ "${GITHUB_REF:-}" == refs/heads/* ]]; then
+if [[ -n "${GITHUB_REF_NAME:-}" ]]; then
+  BRANCH="$GITHUB_REF_NAME"
+elif [[ "${GITHUB_REF:-}" == refs/heads/* ]]; then
   BRANCH="${GITHUB_REF#refs/heads/}"
 else
   BRANCH="$(git -C "$REPO" symbolic-ref --short HEAD 2>/dev/null || true)"
@@ -66,5 +68,5 @@ if ! "$py" "$ROOT/lib/validate_archive.py" deploy-bundle \
   die 3 "packaged artifact failed validation"
 fi
 rm -rf "$verify"
-log "packaged $SHA"
+log "packaged $SHA branch=$BRANCH"
 printf '%s\n' "$OUT"

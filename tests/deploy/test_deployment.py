@@ -368,6 +368,8 @@ def test_wrong_branch_artifact_is_rejected(tmp_path: Path) -> None:
     rejected = run("deploy/bin/deploy.sh", [NEW], layout["env"])
     assert rejected.returncode == 3, rejected.stderr
     assert "deployment artifact was rejected" in rejected.stderr
+    assert "got feature" in rejected.stderr
+    assert "required bud_staging" in rejected.stderr
     assert not (layout["live"] / "app").is_symlink()
     assert (layout["live"] / "app" / "VERSION").read_text() == "v1\n"
     assert_persistent(layout["live"])
@@ -557,6 +559,10 @@ def test_install_dry_run_and_non_root_refusal(tmp_path: Path) -> None:
     assert scripts_only.returncode == 0, scripts_only.stderr
     assert "update installed deploy scripts" in scripts_only.stderr
     assert "PM2 processes unchanged" in scripts_only.stderr
+    bootstrap = (REPO / "deploy/vps/bootstrap-from-incoming.sh").read_text()
+    assert "--scripts-only" in bootstrap
+    assert "incoming/${SHA}.tar.gz" in bootstrap
+    assert "Does not touch" in bootstrap
 
 
 def test_protected_pm2_pid_change_aborts(tmp_path: Path) -> None:
@@ -638,9 +644,21 @@ def test_workflow_and_ecosystem_policy() -> None:
     assert "VPS_PORT" in workflow
     assert "contents: read" in workflow
     assert "bud_staging" in workflow
-    assert "bud_development" not in workflow
     assert "EMPOWERX_AI_ALLOW_MIGRATIONS" not in workflow
     assert "github.ref == 'refs/heads/bud_staging'" in workflow
+    assert "GITHUB_REF_NAME" in workflow
+    deploy_sources = "\n".join(
+        path.read_text()
+        for path in (
+            REPO / ".github/workflows/ai-cicd.yml",
+            REPO / "deploy/bin/deploy.sh",
+            REPO / "deploy/bin/package-artifact.sh",
+            REPO / "deploy/bin/remote-deploy.sh",
+            REPO / "docs/AI-CICD.md",
+        )
+    )
+    assert "bud_staging" in deploy_sources
+    assert "_".join(("bud", "development")) not in deploy_sources
     assert "github.event_name == 'pull_request'" in workflow or "github.event_name == 'push'" in workflow
     assert "permissions:" in workflow
     ecosystem = (REPO / "deploy/vps/ecosystem.config.cjs").read_text()
@@ -680,6 +698,7 @@ def test_package_artifact_round_trip(tmp_path: Path) -> None:
     out = tmp_path / "out.tar.gz"
     env = os.environ.copy()
     env.pop("GITHUB_REF", None)
+    env.pop("GITHUB_REF_NAME", None)
     env["EMPOWERX_AI_REPO"] = str(repo)
     result = subprocess.run(
         ["bash", str(REPO / "deploy/bin/package-artifact.sh"), sha, str(out)],
@@ -696,7 +715,7 @@ def test_package_artifact_round_trip(tmp_path: Path) -> None:
         assert manifest is not None
         assert "branch=bud_staging\n" in manifest.read().decode()
     ci_env = env.copy()
-    ci_env["GITHUB_REF"] = "refs/heads/bud_staging"
+    ci_env["GITHUB_REF_NAME"] = "bud_staging"
     subprocess.run(["git", "checkout", "--detach", sha], cwd=repo, check=True, capture_output=True)
     ci_out = tmp_path / "ci.tar.gz"
     ci_packaged = subprocess.run(

@@ -7,6 +7,7 @@ Reusable from API service and Celery workers.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -28,6 +29,26 @@ def _as_money(value: Decimal | None) -> Decimal:
     if value is None:
         return Decimal("0")
     return Decimal(value)
+
+
+def _elapsed_seconds_since(started_at: datetime) -> int:
+    """
+    Wall-clock seconds from ``started_at`` to now (UTC), rounded.
+
+    Used for end-to-end job time: enqueue (created_at) → completed/failed.
+    """
+    end = datetime.now(timezone.utc)
+    start = started_at
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    return max(0, int(round((end - start).total_seconds())))
+
+
+def _set_processing_duration(row: RadiologyFinding) -> None:
+    """Stamp end-to-end duration when a job reaches a terminal status."""
+    row.processing_duration_seconds = _elapsed_seconds_since(row.created_at)
 
 
 def create_queued_finding(
@@ -83,6 +104,7 @@ def mark_finding_completed(
     row.status = FindingsStatus.COMPLETED
     row.report = report.to_storage_dict()
     row.error_message = None
+    _set_processing_duration(row)
     if modality is not None:
         row.modality = modality
     if case_id is not None:
@@ -109,6 +131,7 @@ def mark_finding_failed(
         return None
     row.status = FindingsStatus.FAILED
     row.error_message = error_message[:4000]
+    _set_processing_duration(row)
     db.commit()
     db.refresh(row)
     return row

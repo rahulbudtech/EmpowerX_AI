@@ -47,6 +47,7 @@ class RadiologyFinding(Base):
         default=FindingsStatus.QUEUED,
         index=True,
     )
+    # Concrete model id used for the job (e.g. gemini-3.6-flash), not vendor label.
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
 
     # Null while queued/processing; filled on completed.
@@ -65,6 +66,14 @@ class RadiologyFinding(Base):
     specialist_override_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Null while queued/processing; set on completed/failed.
+    # Wall-clock seconds from enqueue (created_at) → terminal status (includes
+    # queue wait, preprocess, LLM, and Celery retries).
+    processing_duration_seconds: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

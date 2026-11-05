@@ -1,0 +1,100 @@
+#!/bin/bash
+# Root helper: reload only the two production AI PM2 processes, or dispatch deploy.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+for arg in "$@"; do
+  [[ "$arg" == "all" ]] && die 2 "refusing a command that targets every process"
+done
+
+load_prod_config
+
+if prod_test_mode; then
+  PM2_BIN="${EMPOWERX_PM2:-pm2}"
+  PY="$(python_bin)"
+else
+  export PM2_HOME="${PM2_HOME:-/root/.pm2}"
+  PM2_BIN="${EMPOWERX_AI_PM2:-$(command -v pm2 || true)}"
+  PY="$(python_bin)"
+fi
+[[ -n "$PM2_BIN" ]] || die 4 "pm2 is not available"
+
+run_pm2() {
+  log "pm2 $*"
+  "$PM2_BIN" "$@"
+}
+
+snapshot_protected() {
+  local dest="$1"
+  run_pm2 jlist | "$PY" -c '
+import json, sys
+names = ["empowerx-api", "empowerx-frontend", "empowerx-facility"]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.stderr.write("pm2 process list is unreadable\n")
+    raise SystemExit(1)
+found = {}
+if isinstance(data, dict):
+    data = data.get("processes", [])
+for proc in data:
+    name = proc.get("name")
+    if name in names:
+        found[name] = str(proc.get("pid") or "")
+missing = [name for name in names if not found.get(name) or found.get(name) == "0"]
+if missing:
+    # Other apps may be absent on a dedicated AI host.
+    sys.stdout.write("")
+    raise SystemExit(0)
+for name in names:
+    sys.stdout.write("%s %s\n" % (name, found[name]))
+' > "$dest"
+}
+
+reload_ai() {
+  local before after name
+  before="$(mktemp)"
+  after="$(mktemp)"
+  snapshot_protected "$before"
+  for name in "$EMPOWERX_AI_API_PM2" "$EMPOWERX_AI_WORKER_PM2"; do
+    run_pm2 describe "$name" >/dev/null 2>&1 || die 4 "PM2 process $name is missing"
+    run_pm2 restart "$name"
+  done
+  snapshot_protected "$after"
+  if [[ -s "$before" ]] && ! cmp -s "$before" "$after"; then
+    rm -f "$before" "$after"
+    die 9 "a protected PM2 process changed pid"
+  fi
+  rm -f "$before" "$after"
+  log "restarted $EMPOWERX_AI_API_PM2 and $EMPOWERX_AI_WORKER_PM2"
+}
+
+case "${1:-}" in
+  deploy)
+    [[ $# -eq 2 ]] || die 2 "usage: empowerx-ai-prod deploy SHA"
+    exec "$ROOT/bin/deploy.sh" "$2"
+    ;;
+  rollback)
+    [[ $# -eq 1 ]] || die 2 "usage: empowerx-ai-prod rollback"
+    exec "$ROOT/bin/rollback.sh"
+    ;;
+  reload-ai)
+    [[ $# -eq 1 ]] || die 2 "usage: empowerx-ai-prod reload-ai"
+    reload_ai
+    ;;
+  status-ai)
+    [[ $# -eq 1 ]] || die 2 "usage: empowerx-ai-prod status-ai"
+    run_pm2 describe "$EMPOWERX_AI_API_PM2"
+    run_pm2 describe "$EMPOWERX_AI_WORKER_PM2"
+    ;;
+  health)
+    [[ $# -eq 1 ]] || die 2 "usage: empowerx-ai-prod health"
+    exec "$ROOT/bin/healthcheck.sh"
+    ;;
+  *)
+    die 2 "unknown production helper command"
+    ;;
+esac

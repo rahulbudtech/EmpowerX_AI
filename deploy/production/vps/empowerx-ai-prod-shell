@@ -1,0 +1,58 @@
+#!/bin/bash
+# Forced SSH command for production deploys.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+umask 027
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+if [[ -z "$cmd" && "${EMPOWERX_AI_PROD_TEST:-}" == "1" && -n "${EMPOWERX_AI_ORIGINAL_COMMAND:-}" ]]; then
+  cmd="$EMPOWERX_AI_ORIGINAL_COMMAND"
+fi
+[[ -n "$cmd" ]] || die 2 "interactive shells are disabled"
+if printf '%s\n' "$cmd" | grep -q '[;&|<>`$()\\]'; then
+  die 2 "command rejected"
+fi
+
+set -f
+# shellcheck disable=SC2086
+set -- $cmd
+set +f
+
+action="${1:-}"
+case "$action" in
+  receive-artifact)
+    [[ $# -eq 2 ]] || die 2 "command rejected"
+    assert_sha "$2" || die 2 "invalid commit sha"
+    exec "$ROOT/bin/receive-artifact.sh" "$2"
+    ;;
+  deploy)
+    [[ $# -eq 2 ]] || die 2 "command rejected"
+    assert_sha "$2" || die 2 "invalid commit sha"
+    if [[ "${EMPOWERX_AI_PROD_TEST:-}" == "1" ]]; then
+      exec "$ROOT/bin/deploy.sh" "$2"
+    fi
+    exec sudo -n /usr/local/sbin/empowerx-ai-prod deploy "$2"
+    ;;
+  rollback)
+    [[ $# -eq 1 ]] || die 2 "command rejected"
+    if [[ "${EMPOWERX_AI_PROD_TEST:-}" == "1" ]]; then
+      exec "$ROOT/bin/rollback.sh"
+    fi
+    exec sudo -n /usr/local/sbin/empowerx-ai-prod rollback
+    ;;
+  status)
+    [[ $# -eq 1 ]] || die 2 "command rejected"
+    load_prod_config
+    printf 'current=%s\n' "$(read_state current || printf '%s' missing)"
+    if [[ "${EMPOWERX_AI_PROD_TEST:-}" == "1" ]]; then
+      exec "$ROOT/bin/healthcheck.sh"
+    fi
+    exec sudo -n /usr/local/sbin/empowerx-ai-prod health
+    ;;
+  *)
+    die 2 "command rejected"
+    ;;
+esac

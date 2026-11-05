@@ -1,0 +1,6 @@
+# Production AI deploy account. Installed by deploy/production/vps/install.sh.
+Defaults:empowerx-ai-deploy env_reset
+Defaults:empowerx-ai-deploy secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults:empowerx-ai-deploy !setenv
+
+empowerx-ai-deploy ALL=(root) NOPASSWD: /usr/local/sbin/empowerx-ai-prod

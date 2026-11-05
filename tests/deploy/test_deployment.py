@@ -330,35 +330,46 @@ def test_successful_deploy_preserves_data_and_other_pm2_apps(tmp_path: Path) -> 
     assert_clean_log(log_text)
 
 
-def test_pending_migration_is_not_automatic(tmp_path: Path) -> None:
+def test_pending_migration_is_applied_once(tmp_path: Path) -> None:
     layout = make_layout(tmp_path)
     stage_bundle(layout["state"], NEW, "v2")
     stub = layout["state"] / "stub-runtime"
     (stub / "migrations.exit").write_text("10\n")
     (stub / "migrations.out").write_text("current=keep\nhead=next_rev\npending=next_rev\n")
-    blocked = run("deploy/bin/deploy.sh", [NEW], layout["env"])
-    assert blocked.returncode == 6
-    assert "explicit approval" in blocked.stderr
-    assert not (layout["live"] / "app").is_symlink()
-    calls = (stub / "calls").read_text() if (stub / "calls").exists() else ""
-    assert "apply " not in calls
-
-    (layout["state"] / "allow-migrations").write_text("different\n")
-    layout["env"]["EMPOWERX_AI_APPROVAL_FILE"] = str(layout["state"] / "allow-migrations")
-    (stub / "head").write_text("next_rev\n")
-    mismatched = run("deploy/bin/deploy.sh", [NEW, "migrate=yes"], layout["env"])
-    assert mismatched.returncode == 6
-    assert (layout["state"] / "allow-migrations").exists()
-
-    (layout["state"] / "allow-migrations").write_text("next_rev\n")
-    (layout["state"] / "incoming" / f"{NEW}.tar.gz").unlink()
-    stage_bundle(layout["state"], NEW, "v2")
-    # The failed attempt removed the release directory. Re-stage and approve.
-    approved = run("deploy/bin/deploy.sh", [NEW, "migrate=yes"], layout["env"])
-    assert approved.returncode == 0, approved.stderr
-    assert "apply " in (stub / "calls").read_text()
-    assert not (layout["state"] / "allow-migrations").exists()
+    applied = run("deploy/bin/deploy.sh", [NEW], layout["env"])
+    assert applied.returncode == 0, applied.stderr
+    calls = [line for line in (stub / "calls").read_text().splitlines() if line.startswith("apply ")]
+    assert calls == [f"apply {NEW}"]
     assert "downgrade" not in (stub / "calls").read_text()
+    assert (layout["live"] / "app" / "VERSION").read_text() == "v2\n"
+    assert_persistent(layout["live"])
+
+
+def test_failed_migration_blocks_activation(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+    stage_bundle(layout["state"], NEW, "v2")
+    stub = layout["state"] / "stub-runtime"
+    (stub / "migrations.exit").write_text("10\n")
+    (stub / "migrations.out").write_text("current=keep\nhead=next_rev\npending=next_rev\n")
+    (stub / "migrate.exit").write_text("1\n")
+    failed = run("deploy/bin/deploy.sh", [NEW], layout["env"])
+    assert failed.returncode == 6, failed.stderr
+    assert "migration execution failed" in failed.stderr
+    assert not (layout["live"] / "app").is_symlink()
+    assert (layout["live"] / "app" / "VERSION").read_text() == "v1\n"
+    assert "apply " in (stub / "calls").read_text()
+    assert "downgrade" not in (stub / "calls").read_text()
+    assert_persistent(layout["live"])
+
+
+def test_wrong_branch_artifact_is_rejected(tmp_path: Path) -> None:
+    layout = make_layout(tmp_path)
+    stage_bundle(layout["state"], NEW, "v2", branch="feature")
+    rejected = run("deploy/bin/deploy.sh", [NEW], layout["env"])
+    assert rejected.returncode == 3, rejected.stderr
+    assert "deployment artifact was rejected" in rejected.stderr
+    assert not (layout["live"] / "app").is_symlink()
+    assert (layout["live"] / "app" / "VERSION").read_text() == "v1\n"
     assert_persistent(layout["live"])
 
 
@@ -530,6 +541,22 @@ def test_install_dry_run_and_non_root_refusal(tmp_path: Path) -> None:
     )
     assert refused.returncode == 1
     assert "root" in refused.stderr
+    scripts_only = subprocess.run(
+        [
+            "bash",
+            str(REPO / "deploy/vps/install.sh"),
+            "--scripts-only",
+            "--bundle",
+            str(REPO / "deploy"),
+            "--dry-run",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert scripts_only.returncode == 0, scripts_only.stderr
+    assert "update installed deploy scripts" in scripts_only.stderr
+    assert "PM2 processes unchanged" in scripts_only.stderr
 
 
 def test_protected_pm2_pid_change_aborts(tmp_path: Path) -> None:
@@ -547,10 +574,41 @@ def test_migration_scanner_and_env_parser(tmp_path: Path) -> None:
     scanner = REPO / "deploy/lib/scan_migrations.py"
     existing = subprocess.run(["python3", str(scanner), str(REPO / "migrations")], capture_output=True, text=True)
     assert existing.returncode == 0, existing.stderr
+    token_usage = REPO / "migrations/versions/20260429_0006_create_radiology_token_usage.py"
+    accepted = subprocess.run(["python3", str(scanner), str(token_usage)], capture_output=True, text=True)
+    assert accepted.returncode == 0, accepted.stderr
+    normal = tmp_path / "normal.py"
+    normal.write_text(
+        "def upgrade():\n"
+        '    op.create_table("radiology_token_usage")\n'
+        "def downgrade():\n"
+        '    op.drop_table("radiology_token_usage")\n'
+    )
+    allowed = subprocess.run(["python3", str(scanner), str(normal)], capture_output=True, text=True)
+    assert allowed.returncode == 0, allowed.stderr
+    downgrade_only = tmp_path / "downgrade_users.py"
+    downgrade_only.write_text(
+        "def upgrade():\n"
+        "    return\n"
+        "def downgrade():\n"
+        '    op.drop_table("users")\n'
+    )
+    ignored = subprocess.run(["python3", str(scanner), str(downgrade_only)], capture_output=True, text=True)
+    assert ignored.returncode == 0, ignored.stderr
     bad = tmp_path / "bad.py"
     bad.write_text('op.drop_table("users")\n')
     rejected = subprocess.run(["python3", str(scanner), str(bad)], capture_output=True, text=True)
     assert rejected.returncode == 1
+    destructive = tmp_path / "destructive.py"
+    destructive.write_text(
+        "def upgrade():\n"
+        '    op.drop_table("users")\n'
+        "def downgrade():\n"
+        "    return\n"
+    )
+    blocked = subprocess.run(["python3", str(scanner), str(destructive)], capture_output=True, text=True)
+    assert blocked.returncode == 1
+    assert "drop_table targets users" in blocked.stderr
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("migration_status", REPO / "deploy/lib/migration_status.py")
@@ -579,7 +637,10 @@ def test_workflow_and_ecosystem_policy() -> None:
     assert "VPS_USER" in workflow
     assert "VPS_PORT" in workflow
     assert "contents: read" in workflow
-    assert "bud_development" in workflow
+    assert "bud_staging" in workflow
+    assert "bud_development" not in workflow
+    assert "EMPOWERX_AI_ALLOW_MIGRATIONS" not in workflow
+    assert "github.ref == 'refs/heads/bud_staging'" in workflow
     assert "github.event_name == 'pull_request'" in workflow or "github.event_name == 'push'" in workflow
     assert "permissions:" in workflow
     ecosystem = (REPO / "deploy/vps/ecosystem.config.cjs").read_text()
@@ -607,7 +668,7 @@ def test_package_artifact_round_trip(tmp_path: Path) -> None:
     (repo / "alembic.ini").write_text("[alembic]\nscript_location = migrations\n")
     (repo / "pyproject.toml").write_text("[project]\nname='t'\nversion='0'\n")
     (repo / "migrations" / "versions" / "keep.py").write_text("revision = 'keep'\n")
-    subprocess.run(["git", "init", "-b", "bud_development"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "bud_staging"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
     subprocess.run(
         ["git", "-c", "user.email=deploy@example.com", "-c", "user.name=Deploy", "commit", "-m", "init"],
@@ -618,6 +679,7 @@ def test_package_artifact_round_trip(tmp_path: Path) -> None:
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     out = tmp_path / "out.tar.gz"
     env = os.environ.copy()
+    env.pop("GITHUB_REF", None)
     env["EMPOWERX_AI_REPO"] = str(repo)
     result = subprocess.run(
         ["bash", str(REPO / "deploy/bin/package-artifact.sh"), sha, str(out)],
@@ -629,3 +691,46 @@ def test_package_artifact_round_trip(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert out.exists()
     assert (tmp_path / "out.tar.gz.sha256").read_text().strip()
+    with tarfile.open(out, "r:gz") as archive:
+        manifest = archive.extractfile("manifest.txt")
+        assert manifest is not None
+        assert "branch=bud_staging\n" in manifest.read().decode()
+    ci_env = env.copy()
+    ci_env["GITHUB_REF"] = "refs/heads/bud_staging"
+    subprocess.run(["git", "checkout", "--detach", sha], cwd=repo, check=True, capture_output=True)
+    ci_out = tmp_path / "ci.tar.gz"
+    ci_packaged = subprocess.run(
+        ["bash", str(REPO / "deploy/bin/package-artifact.sh"), sha, str(ci_out)],
+        env=ci_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert ci_packaged.returncode == 0, ci_packaged.stderr
+    with tarfile.open(ci_out, "r:gz") as archive:
+        manifest = archive.extractfile("manifest.txt")
+        assert manifest is not None
+        assert "branch=bud_staging\n" in manifest.read().decode()
+    subprocess.run(["git", "checkout", "-B", "feature", sha], cwd=repo, check=True, capture_output=True)
+    feature_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    feature_out = tmp_path / "feature.tar.gz"
+    feature = subprocess.run(
+        ["bash", str(REPO / "deploy/bin/package-artifact.sh"), feature_sha, str(feature_out)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert feature.returncode == 0, feature.stderr
+    with tarfile.open(feature_out, "r:gz") as archive:
+        manifest = archive.extractfile("manifest.txt")
+        assert manifest is not None
+        text = manifest.read().decode()
+    assert "branch=feature\n" in text
+    layout = make_layout(tmp_path / "layout")
+    incoming = layout["state"] / "incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(feature_out, incoming / f"{feature_sha}.tar.gz")
+    shutil.copy2(tmp_path / "feature.tar.gz.sha256", incoming / f"{feature_sha}.sha256")
+    rejected = run("deploy/bin/deploy.sh", [feature_sha], layout["env"])
+    assert rejected.returncode == 3, rejected.stderr

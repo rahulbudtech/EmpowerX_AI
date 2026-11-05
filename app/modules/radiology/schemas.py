@@ -264,6 +264,7 @@ class DicomAnalyzeQueuedResponse(BaseModel):
     id: uuid.UUID
     case_id: str | None = None
     source_file: str | None = None
+    # Concrete model id (e.g. gemini-3.6-flash).
     provider: str
     status: str
 
@@ -286,9 +287,12 @@ class FindingsDetailResponse(BaseModel):
     source_file: str | None = None
     modality: str | None = None
     status: str
+    # Concrete model id (e.g. gemini-3.6-flash).
     provider: str
     report: RadiologyReport | None = None
     preprocess_image_url: str | None = None
     error_message: str | None = None
+    # Null while queued/processing; seconds from enqueue → completed/failed.
+    processing_duration_seconds: int | None = None
     created_at: datetime
     updated_at: datetime

@@ -211,7 +211,8 @@ def enqueue_dicom_analyze(
     row = create_queued_finding(
         db,
         finding_id=finding_id,
-        provider=cfg.llm_provider,
+        # Persist concrete model id (e.g. gemini-3.6-flash), not vendor label.
+        provider=cfg.llm_model,
         case_id=case_id,
         source_file=source_name,
     )
@@ -381,6 +382,7 @@ def get_findings(db: Session, finding_id: uuid.UUID) -> FindingsDetailResponse:
         report=report,
         preprocess_image_url=row.preprocess_image_url,
         error_message=row.error_message,
+        processing_duration_seconds=row.processing_duration_seconds,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -455,6 +457,6 @@ def _run_findings(pre: PreprocessResult, *, settings: Settings) -> AnalyzeResult
         report=report,
         metadata=pre.metadata,
         preprocess=pre,
-        provider=settings.llm_provider,
+        provider=settings.llm_model,
         usage=llm_result.usage,
     )

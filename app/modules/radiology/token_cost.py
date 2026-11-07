@@ -2,10 +2,10 @@
 Estimate USD cost from LLM token usage using human-approved env rates.
 
 Rates are not scraped and not date-switched here — operators update
-``GEMINI_*_PRICE_PER_MILLION_USD`` when Google changes pricing.
+``GEMINI_*`` / ``ANTHROPIC_*_PRICE_PER_MILLION_USD`` when providers change pricing.
 
-Gemini bills thinking/reasoning tokens at the **output** rate
-(see provider docs: "Output price (including thinking tokens)").
+Gemini: thinking/reasoning tokens billed at the **output** rate.
+Anthropic: no separate reasoning meter in our usage — ``reasoning_tokens`` stays 0.
 """
 
 from __future__ import annotations

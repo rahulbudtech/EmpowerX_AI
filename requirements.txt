@@ -11,7 +11,9 @@ pylibjpeg==2.1.0
 pylibjpeg-libjpeg==2.4.0
 pylibjpeg-openjpeg==2.6.0
 google-genai==2.32.0
+anthropic>=0.40.0
 fastapi>=0.115.0
+
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 sqlalchemy>=2.0.36

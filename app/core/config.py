@@ -22,22 +22,34 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- LLM (Gemini primary; fallback TBD) ---
-    llm_provider: str = Field(default="gemini", description="Primary provider id")
+    # --- LLM primary (any supported provider; switch via env) ---
+    llm_provider: str = Field(
+        default="gemini",
+        alias="LLM_PROVIDER",
+        description="Primary provider id: gemini | anthropic",
+    )
     llm_model: str = Field(
         default="gemini-3.6-flash",
+        alias="LLM_MODEL",
         description="Primary model name for findings",
     )
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
 
-    # Optional fallback (not wired yet — reserved)
-    llm_fallback_provider: str | None = None
-    llm_fallback_model: str | None = None
+    # Optional fallback (tried once if primary fails; also switchable via env)
+    llm_fallback_provider: str | None = Field(
+        default=None,
+        alias="LLM_FALLBACK_PROVIDER",
+    )
+    llm_fallback_model: str | None = Field(
+        default=None,
+        alias="LLM_FALLBACK_MODEL",
+    )
 
     # --- LLM token cost (USD per 1M tokens; human-approved, env-updated) ---
-    # Defaults match Gemini 3.6 Flash paid tier (through Dec 31, 2026 docs).
-    # Thinking/reasoning tokens are billed at the output rate.
+    # Gemini: thinking/reasoning billed at output rate.
+    # Anthropic: no separate reasoning meter — keep reasoning_tokens at 0 in usage.
     gemini_input_price_per_million_usd: float = Field(
         default=0.75,
         alias="GEMINI_INPUT_PRICE_PER_MILLION_USD",
@@ -49,6 +61,19 @@ class Settings(BaseSettings):
     gemini_cached_input_price_per_million_usd: float = Field(
         default=0.075,
         alias="GEMINI_CACHED_INPUT_PRICE_PER_MILLION_USD",
+    )
+    # Anthropic: input $2 / output $10 / MTok; cache read $0.10 / MTok.
+    anthropic_input_price_per_million_usd: float = Field(
+        default=2.0,
+        alias="ANTHROPIC_INPUT_PRICE_PER_MILLION_USD",
+    )
+    anthropic_output_price_per_million_usd: float = Field(
+        default=10.0,
+        alias="ANTHROPIC_OUTPUT_PRICE_PER_MILLION_USD",
+    )
+    anthropic_cached_input_price_per_million_usd: float = Field(
+        default=0.10,
+        alias="ANTHROPIC_CACHED_INPUT_PRICE_PER_MILLION_USD",
     )
 
     # --- Postgres ---
@@ -129,6 +154,23 @@ class Settings(BaseSettings):
             output_per_million_usd=self.gemini_output_price_per_million_usd,
             cached_input_per_million_usd=self.gemini_cached_input_price_per_million_usd,
         )
+
+    def anthropic_token_cost_rates(self):
+        """Human-approved USD rates for Anthropic token cost estimates."""
+        from app.modules.radiology.token_cost import TokenCostRates
+
+        return TokenCostRates.from_floats(
+            input_per_million_usd=self.anthropic_input_price_per_million_usd,
+            output_per_million_usd=self.anthropic_output_price_per_million_usd,
+            cached_input_per_million_usd=self.anthropic_cached_input_price_per_million_usd,
+        )
+
+    def token_cost_rates_for_model(self, model: str | None):
+        """Pick Gemini vs Anthropic rates from the concrete model id."""
+        name = (model or "").strip().lower()
+        if "claude" in name or name.startswith("anthropic"):
+            return self.anthropic_token_cost_rates()
+        return self.gemini_token_cost_rates()
 
     @property
     def resolved_celery_broker_url(self) -> str:

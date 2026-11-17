@@ -97,6 +97,7 @@ def mark_finding_completed(
     source_file: str | None = None,
     preprocess_metadata: dict | None = None,
     preprocess_image_url: str | None = None,
+    provider: str | None = None,
 ) -> RadiologyFinding | None:
     row = get_finding_by_id(db, finding_id)
     if row is None:
@@ -115,6 +116,9 @@ def mark_finding_completed(
         row.preprocess_metadata = preprocess_metadata
     if preprocess_image_url is not None:
         row.preprocess_image_url = preprocess_image_url
+    # Actual model that produced the report (primary or fallback).
+    if provider is not None:
+        row.provider = provider[:64]
     db.commit()
     db.refresh(row)
     return row

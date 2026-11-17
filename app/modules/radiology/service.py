@@ -168,7 +168,10 @@ def _persist_token_usage_best_effort(
     if usage is None:
         return
     try:
-        cost = estimate_cost_usd(usage, settings.gemini_token_cost_rates())
+        cost = estimate_cost_usd(
+            usage,
+            settings.token_cost_rates_for_model(usage.llm_model),
+        )
         accumulate_token_usage(
             db,
             finding_id=finding_id,
@@ -316,6 +319,7 @@ def process_queued_dicom(
             source_file=result.metadata.source_file or row.source_file,
             preprocess_metadata=result.metadata.model_dump(mode="json"),
             preprocess_image_url=str(image_path),
+            provider=result.provider,
         )
         _persist_token_usage_best_effort(
             db,
@@ -457,6 +461,7 @@ def _run_findings(pre: PreprocessResult, *, settings: Settings) -> AnalyzeResult
         report=report,
         metadata=pre.metadata,
         preprocess=pre,
-        provider=settings.llm_model,
+        # Concrete model that produced the report (primary or fallback).
+        provider=llm_result.model,
         usage=llm_result.usage,
     )

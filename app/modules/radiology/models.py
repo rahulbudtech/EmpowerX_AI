@@ -4,6 +4,7 @@ Radiology ORM models (provisional schema — product schema TBD).
 Tables:
   - radiology_findings — one row per analyze job (queued → completed/failed)
   - radiology_token_usage — LLM tokens + estimated USD cost per finding job
+  - radiology_llm_settings — singleton primary/fallback model selection
 """
 
 from __future__ import annotations
@@ -125,6 +126,32 @@ class RadiologyTokenUsage(Base):
         server_default=func.now(),
         nullable=False,
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RadiologyLlmSettings(Base):
+    """
+    Global primary + optional fallback LLM selection (at most one logical row).
+
+    When present, runtime uses these values instead of ``LLM_*`` env defaults.
+    """
+
+    __tablename__ = "radiology_llm_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    primary_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    primary_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    fallback_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fallback_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

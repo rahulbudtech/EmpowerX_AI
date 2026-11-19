@@ -14,14 +14,19 @@ from app.modules.auth.schemas import AccessTokenClaims
 from app.modules.radiology.schemas import (
     DicomAnalyzeBatchQueuedResponse,
     FindingsDetailResponse,
+    LlmSettingsResponse,
+    LlmSettingsUpdateRequest,
 )
 from app.modules.radiology.service import (
     FindingNotFoundError,
+    InvalidLlmSettingsError,
     InvalidUploadError,
     RadiologyServiceError,
     UploadFilePayload,
     enqueue_dicom_batch,
     get_findings,
+    get_llm_settings,
+    update_llm_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,5 +93,38 @@ def read_findings(
     except FindingNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/llm-settings",
+    response_model=LlmSettingsResponse,
+    summary="Get primary/fallback LLM selection and allowed options",
+)
+def read_llm_settings(
+    db: Session = Depends(get_db),
+    _caller: AccessTokenClaims = Depends(require_analyze_caller),
+) -> LlmSettingsResponse:
+    """DB selection when saved; otherwise env defaults. Includes dropdown options."""
+    return get_llm_settings(db)
+
+
+@router.put(
+    "/llm-settings",
+    response_model=LlmSettingsResponse,
+    summary="Save primary/fallback LLM selection",
+)
+def write_llm_settings(
+    body: LlmSettingsUpdateRequest,
+    db: Session = Depends(get_db),
+    _caller: AccessTokenClaims = Depends(require_analyze_caller),
+) -> LlmSettingsResponse:
+    """Persist singleton settings; subsequent analyze jobs use this until changed."""
+    try:
+        return update_llm_settings(db, body)
+    except InvalidLlmSettingsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc

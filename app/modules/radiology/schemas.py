@@ -296,3 +296,48 @@ class FindingsDetailResponse(BaseModel):
     processing_duration_seconds: int | None = None
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# LLM primary / fallback settings (UI selection)
+# ---------------------------------------------------------------------------
+
+
+class LlmModelRef(BaseModel):
+    """One provider + model pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+
+
+class LlmModelOptionResponse(BaseModel):
+    """Dropdown option for the settings UI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+    label: str
+
+
+class LlmSettingsUpdateRequest(BaseModel):
+    """PUT body: primary required; fallback optional (both null clears it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary: LlmModelRef
+    fallback: LlmModelRef | None = None
+
+
+class LlmSettingsResponse(BaseModel):
+    """GET/PUT response: current selection + allowed options."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary: LlmModelRef
+    fallback: LlmModelRef | None = None
+    source: str  # "db" | "env"
+    options: list[LlmModelOptionResponse]
+    updated_at: datetime | None = None

@@ -28,6 +28,13 @@ from app.modules.radiology.preprocess import (
     preprocess_dicom_bytes,
     preprocess_dicom_path,
 )
+from app.modules.radiology.llm_settings import (
+    LlmSettingsValidationError,
+    ResolvedLlmSelection,
+    resolve_llm_selection,
+    to_settings_response,
+    validate_settings_update,
+)
 from app.modules.radiology.repository import (
     accumulate_token_usage,
     create_queued_finding,
@@ -35,11 +42,14 @@ from app.modules.radiology.repository import (
     mark_finding_completed,
     mark_finding_failed,
     mark_finding_processing,
+    upsert_llm_settings,
 )
 from app.modules.radiology.schemas import (
     DicomAnalyzeBatchQueuedResponse,
     DicomAnalyzeQueuedResponse,
     FindingsDetailResponse,
+    LlmSettingsResponse,
+    LlmSettingsUpdateRequest,
     LlmTokenUsage,
     RadiologyReport,
     SafeDicomMetadata,
@@ -61,6 +71,10 @@ class RadiologyServiceError(Exception):
 
 class InvalidUploadError(RadiologyServiceError):
     """Client upload is missing or empty / over limits (maps to HTTP 400)."""
+
+
+class InvalidLlmSettingsError(RadiologyServiceError):
+    """LLM settings body failed validation (maps to HTTP 400)."""
 
 
 class FindingNotFoundError(RadiologyServiceError):
@@ -211,11 +225,13 @@ def enqueue_dicom_analyze(
     finding_id = uuid.uuid4()
     file_path = save_upload_bytes(data, finding_id=finding_id, filename=source_name)
 
+    selection = resolve_llm_selection(db, settings=cfg)
     row = create_queued_finding(
         db,
         finding_id=finding_id,
-        # Persist concrete model id (e.g. gemini-3.6-flash), not vendor label.
-        provider=cfg.llm_model,
+        # Planned primary model at enqueue; completed jobs overwrite with the
+        # model that actually produced the report (primary or fallback).
+        provider=selection.primary_model,
         case_id=case_id,
         source_file=source_name,
     )
@@ -309,7 +325,8 @@ def process_queued_dicom(
             settings=cfg,
         )
 
-        result = _run_findings(pre, settings=cfg)
+        selection = resolve_llm_selection(db, settings=cfg)
+        result = _run_findings(pre, settings=cfg, selection=selection)
         mark_finding_completed(
             db,
             finding_id,
@@ -412,7 +429,7 @@ def analyze_dicom_path(
     except DicomPreprocessError as exc:
         raise PermanentPipelineError(str(exc)) from exc
 
-    return _run_findings(pre, settings=cfg)
+    return _run_findings(pre, settings=cfg, selection=None)
 
 
 def analyze_dicom_bytes(
@@ -435,15 +452,58 @@ def analyze_dicom_bytes(
     except DicomPreprocessError as exc:
         raise PermanentPipelineError(str(exc)) from exc
 
-    return _run_findings(pre, settings=cfg)
+    return _run_findings(pre, settings=cfg, selection=None)
 
 
-def _run_findings(pre: PreprocessResult, *, settings: Settings) -> AnalyzeResult:
+def get_llm_settings(
+    db: Session,
+    *,
+    settings: Settings | None = None,
+) -> LlmSettingsResponse:
+    """Return current primary/fallback selection (DB if set, else env) + options."""
+    cfg = settings or get_settings()
+    selection = resolve_llm_selection(db, settings=cfg)
+    return to_settings_response(selection)
+
+
+def update_llm_settings(
+    db: Session,
+    body: LlmSettingsUpdateRequest,
+    *,
+    settings: Settings | None = None,
+) -> LlmSettingsResponse:
+    """Validate, persist singleton settings, return the updated view."""
+    cfg = settings or get_settings()
+    try:
+        primary_provider, primary_model, fallback_provider, fallback_model = (
+            validate_settings_update(body)
+        )
+    except LlmSettingsValidationError as exc:
+        raise InvalidLlmSettingsError(str(exc)) from exc
+
+    upsert_llm_settings(
+        db,
+        primary_provider=primary_provider,
+        primary_model=primary_model,
+        fallback_provider=fallback_provider,
+        fallback_model=fallback_model,
+    )
+    selection = resolve_llm_selection(db, settings=cfg)
+    return to_settings_response(selection)
+
+
+def _run_findings(
+    pre: PreprocessResult,
+    *,
+    settings: Settings,
+    selection: ResolvedLlmSelection | None,
+) -> AnalyzeResult:
     try:
         llm_result = generate_findings_report(
             pre.image_u8,
             pre.metadata,
             settings=settings,
+            selection=selection,
         )
     except FindingsLLMTransientError as exc:
         raise TransientPipelineError(str(exc), token_usage=exc.usage) from exc

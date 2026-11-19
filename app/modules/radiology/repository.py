@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.modules.radiology.models import (
     FindingsStatus,
     RadiologyFinding,
+    RadiologyLlmSettings,
     RadiologyTokenUsage,
 )
 from app.modules.radiology.schemas import LlmTokenUsage, RadiologyReport
@@ -226,6 +227,44 @@ def accumulate_token_usage(
         row.total_tokens = _as_int(row.total_tokens) + usage.total_tokens
         row.llm_calls = _as_int(row.llm_calls) + max(0, llm_calls_delta)
         row.estimated_cost_usd = _as_money(row.estimated_cost_usd) + cost_delta
+
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_llm_settings_row(db: Session) -> RadiologyLlmSettings | None:
+    """Return the singleton LLM settings row if one exists."""
+    return db.execute(select(RadiologyLlmSettings).limit(1)).scalar_one_or_none()
+
+
+def upsert_llm_settings(
+    db: Session,
+    *,
+    primary_provider: str,
+    primary_model: str,
+    fallback_provider: str | None,
+    fallback_model: str | None,
+) -> RadiologyLlmSettings:
+    """
+    Create or update the singleton LLM settings row.
+
+    At most one row is kept; subsequent saves overwrite that row.
+    """
+    row = get_llm_settings_row(db)
+    if row is None:
+        row = RadiologyLlmSettings(
+            primary_provider=primary_provider,
+            primary_model=primary_model,
+            fallback_provider=fallback_provider,
+            fallback_model=fallback_model,
+        )
+        db.add(row)
+    else:
+        row.primary_provider = primary_provider
+        row.primary_model = primary_model
+        row.fallback_provider = fallback_provider
+        row.fallback_model = fallback_model
 
     db.commit()
     db.refresh(row)

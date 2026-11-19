@@ -23,6 +23,10 @@ from app.modules.radiology.llm_errors import (
     FindingsLLMTransientError,
     FindingsLlmResult,
 )
+from app.modules.radiology.llm_settings import (
+    ResolvedLlmSelection,
+    selection_from_env,
+)
 from app.modules.radiology.providers import (
     call_provider,
     normalize_provider,
@@ -174,22 +178,24 @@ def parse_radiology_report(raw: str) -> RadiologyReport:
 # ---------------------------------------------------------------------------
 
 
-def _attempt_slots(settings: Settings) -> list[tuple[str, str]]:
+def _attempt_slots(selection: ResolvedLlmSelection) -> list[tuple[str, str]]:
     """
-    Build ordered (provider, model) attempts from settings.
+    Build ordered (provider, model) attempts from a resolved selection.
 
     Primary is always first. Fallback is appended when both provider and model
     are set and differ from primary.
     """
-    primary_provider = normalize_provider(settings.llm_provider)
-    primary_model = (settings.llm_model or "").strip()
+    primary_provider = normalize_provider(selection.primary_provider)
+    primary_model = (selection.primary_model or "").strip()
     if not primary_model:
-        raise FindingsLLMError("LLM_MODEL is missing. Set it in .env")
+        raise FindingsLLMError(
+            "Primary LLM model is missing. Set LLM_MODEL or save LLM settings."
+        )
 
     slots: list[tuple[str, str]] = [(primary_provider, primary_model)]
 
-    fb_provider_raw = (settings.llm_fallback_provider or "").strip()
-    fb_model = (settings.llm_fallback_model or "").strip()
+    fb_provider_raw = (selection.fallback_provider or "").strip()
+    fb_model = (selection.fallback_model or "").strip()
     if fb_provider_raw and fb_model:
         fb_provider = normalize_provider(fb_provider_raw)
         if (fb_provider, fb_model) != (primary_provider, primary_model):
@@ -233,20 +239,22 @@ def generate_findings_report(
     metadata: SafeDicomMetadata,
     *,
     settings: Settings | None = None,
+    selection: ResolvedLlmSelection | None = None,
 ) -> FindingsLlmResult:
     """
     Run findings LLM on a preprocessed image + safe metadata.
 
-    Tries ``LLM_PROVIDER`` / ``LLM_MODEL`` first. On failure, if
-    ``LLM_FALLBACK_PROVIDER`` / ``LLM_FALLBACK_MODEL`` are set, tries once more.
-    Either role can be gemini or anthropic — controlled only by env.
+    Tries primary first; on failure tries fallback once when configured.
+    ``selection`` normally comes from DB (preferred) or env via
+    ``resolve_llm_selection``; when omitted, env defaults are used.
     """
     cfg = settings or get_settings()
+    resolved = selection or selection_from_env(cfg)
     system_prompt = load_system_prompt()
     user_text = build_user_text(metadata)
     image = image_u8_to_pil(image_u8)
 
-    slots = _attempt_slots(cfg)
+    slots = _attempt_slots(resolved)
     last_exc: FindingsLLMError | None = None
 
     for index, (provider, model) in enumerate(slots):

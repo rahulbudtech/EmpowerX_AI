@@ -173,7 +173,7 @@ Docker files (`*.dev` / `*.prod`) are **placeholders for DevOps** — not requir
 5. Persist to `radiology_findings` (Postgres)
 6. Best-effort upsert to `radiology_token_usage` (tokens + estimated USD cost)
 
-`case_id` is taken from DICOM **AccessionNumber** when present (not the upload folder UUID).  
+`case_id` is **required from the frontend** on `POST /radiology/dicom/analyze` (same value stored on findings + token usage). It is **not** derived from DICOM tags.  
 Upload API accepts only `.dcm` / `.dicom` with a valid DICOM Part 10 (`DICM`) marker.
 
 ---
@@ -194,7 +194,7 @@ One row per DICOM analyze job. Notable columns (some reserved for later wiring):
 
 One row per finding job (`finding_id` unique FK). Written by the same radiology Celery worker (no separate queue). Counters accumulate across LLM retries.
 
-- `case_id` — DICOM-derived case id (for later dashboard grouping)  
+- `case_id` — frontend-supplied case id (same as findings; for dashboard grouping)  
 - `llm_model` — model that ran the call  
 - `input_tokens` / `output_tokens` / `reasoning_tokens` / `cached_input_tokens` / `total_tokens`  
 - `llm_calls` — provider call count for this job  

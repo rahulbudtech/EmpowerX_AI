@@ -45,20 +45,21 @@ async def analyze_dicom(
         ...,
         description="1 to 3 DICOM files (.dcm / .dicom), max 10 MB each",
     ),
-    case_id: str | None = Form(
-        default=None,
-        description="Optional provisional case id (applied to all files in the batch)",
+    case_id: str = Form(
+        ...,
+        description="Case id from the frontend (applied to all files in the batch)",
     ),
     db: Session = Depends(get_db),
     caller: AccessTokenClaims = Depends(require_analyze_caller),
 ) -> DicomAnalyzeBatchQueuedResponse:
     """Accept uploads → queue one job per file → return job ids immediately."""
     logger.info(
-        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s",
+        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s case_id=%s",
         caller.user_id,
         caller.facility_id,
         caller.role,
         caller.type,
+        case_id,
     )
     payloads = [
         UploadFilePayload(data=await f.read(), filename=f.filename) for f in files

@@ -39,6 +39,7 @@ class RadiologyFinding(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
+    # Frontend-supplied on analyze upload; not derived from DICOM.
     case_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     source_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
     modality: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -109,6 +110,7 @@ class RadiologyTokenUsage(Base):
         nullable=False,
         unique=True,
     )
+    # Copied from findings at token persist (frontend case id).
     case_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

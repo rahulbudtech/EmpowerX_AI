@@ -201,20 +201,30 @@ def _persist_token_usage_best_effort(
         )
 
 
+def _require_case_id(case_id: str | None) -> str:
+    """Normalize frontend case_id; blank/whitespace is rejected."""
+    value = (case_id or "").strip()
+    if not value:
+        raise InvalidUploadError("case_id is required.")
+    return value
+
+
 def enqueue_dicom_analyze(
     data: bytes,
     *,
     db: Session,
+    case_id: str,
     filename: str | None = None,
-    case_id: str | None = None,
     settings: Settings | None = None,
 ) -> DicomAnalyzeQueuedResponse:
     """
     Stage one DICOM, create ``queued`` row, push Celery task.
 
     Prefer ``enqueue_dicom_batch`` from the API (applies count/size limits).
+    ``case_id`` must come from the frontend (never from DICOM).
     """
     cfg = settings or get_settings()
+    normalized_case_id = _require_case_id(case_id)
     max_bytes = cfg.max_dicom_file_size_mb * 1024 * 1024
     _validate_one_dicom_upload(
         UploadFilePayload(data=data, filename=filename),
@@ -232,15 +242,20 @@ def enqueue_dicom_analyze(
         # Planned primary model at enqueue; completed jobs overwrite with the
         # model that actually produced the report (primary or fallback).
         provider=selection.primary_model,
-        case_id=case_id,
+        case_id=normalized_case_id,
         source_file=source_name,
     )
 
     # Late import avoids circular import at module load (celery → tasks → service).
     from app.workers.tasks.radiology_tasks import analyze_dicom_task
 
-    analyze_dicom_task.delay(str(row.id), str(file_path), None)
-    logger.info("Enqueued radiology.analyze_dicom finding_id=%s path=%s", row.id, file_path)
+    analyze_dicom_task.delay(str(row.id), str(file_path))
+    logger.info(
+        "Enqueued radiology.analyze_dicom finding_id=%s case_id=%s path=%s",
+        row.id,
+        row.case_id,
+        file_path,
+    )
 
     return DicomAnalyzeQueuedResponse(
         id=row.id,
@@ -255,13 +270,16 @@ def enqueue_dicom_batch(
     files: list[UploadFilePayload],
     *,
     db: Session,
-    case_id: str | None = None,
+    case_id: str,
     settings: Settings | None = None,
 ) -> DicomAnalyzeBatchQueuedResponse:
     """
-    API entry: validate 1-3 DICOMs (max 10 MB each) -> enqueue one Celery job per file.
+    API entry: validate 1-3 DICOMs (max 10 MB each) → enqueue one Celery job per file.
+
+    ``case_id`` is required from the frontend and applied to every job in the batch.
     """
     cfg = settings or get_settings()
+    normalized_case_id = _require_case_id(case_id)
     _validate_upload_batch(files, settings=cfg)
 
     jobs = [
@@ -269,7 +287,7 @@ def enqueue_dicom_batch(
             item.data,
             db=db,
             filename=item.filename,
-            case_id=case_id,
+            case_id=normalized_case_id,
             settings=cfg,
         )
         for item in files
@@ -282,7 +300,6 @@ def process_queued_dicom(
     *,
     finding_id: uuid.UUID,
     file_path: str | Path,
-    case_id: str | None = None,
     settings: Settings | None = None,
 ) -> None:
     """
@@ -293,6 +310,9 @@ def process_queued_dicom(
     ``TransientPipelineError`` so Celery can retry (failed only after max retries).
 
     When the LLM ran, token usage is accumulated even if the job fails or retries.
+
+    ``case_id`` is taken only from the findings row (set at enqueue from the
+    frontend). It is never derived from DICOM metadata.
     """
     cfg = settings or get_settings()
     path = Path(file_path)
@@ -301,22 +321,20 @@ def process_queued_dicom(
     if row is None:
         raise FindingNotFoundError(f"Findings not found: {finding_id}")
 
-    resolved_case_id = case_id or row.case_id
+    # Source of truth: frontend case_id stored on the finding at enqueue.
+    job_case_id = row.case_id
 
     try:
-        # case_id comes from DICOM AccessionNumber via preprocess (not upload folder).
         try:
             pre = preprocess_dicom_path(
                 path,
                 use_dicom_window=True,
-                case_id=None,
+                case_id=job_case_id,
             )
         except FileNotFoundError as exc:
             raise PermanentPipelineError(str(exc)) from exc
         except DicomPreprocessError as exc:
             raise PermanentPipelineError(str(exc)) from exc
-
-        resolved_case_id = pre.metadata.case_id or resolved_case_id
 
         # Local PNG until S3 — same disk as worker/API via PREPROCESS_IMAGE_DIR.
         image_path = save_preprocessed_image(
@@ -332,7 +350,6 @@ def process_queued_dicom(
             finding_id,
             report=result.report,
             modality=result.metadata.modality,
-            case_id=result.metadata.case_id,
             source_file=result.metadata.source_file or row.source_file,
             preprocess_metadata=result.metadata.model_dump(mode="json"),
             preprocess_image_url=str(image_path),
@@ -342,12 +359,13 @@ def process_queued_dicom(
             db,
             finding_id=finding_id,
             usage=result.usage,
-            case_id=result.metadata.case_id or resolved_case_id,
+            case_id=job_case_id,
             settings=cfg,
         )
         logger.info(
-            "Completed radiology analyze finding_id=%s image=%s",
+            "Completed radiology analyze finding_id=%s case_id=%s image=%s",
             finding_id,
+            job_case_id,
             image_path,
         )
     except TransientPipelineError as exc:
@@ -360,7 +378,7 @@ def process_queued_dicom(
             db,
             finding_id=finding_id,
             usage=exc.token_usage,
-            case_id=resolved_case_id,
+            case_id=job_case_id,
             settings=cfg,
         )
         raise
@@ -371,7 +389,7 @@ def process_queued_dicom(
             db,
             finding_id=finding_id,
             usage=exc.token_usage,
-            case_id=resolved_case_id,
+            case_id=job_case_id,
             settings=cfg,
         )
         raise

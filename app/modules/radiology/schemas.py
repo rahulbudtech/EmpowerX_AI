@@ -78,6 +78,7 @@ class SafeDicomMetadata(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Caller-supplied (frontend / API). Never derived from DICOM tags.
     case_id: str | None = None
     source_file: str | None = None
     # Clinical context for findings LLM (not name / ID).
@@ -110,7 +111,8 @@ class SafeDicomMetadata(BaseModel):
     phi_stripped: bool = True
     note: str = (
         "Patient name, ID, accession, institution, etc. are excluded. "
-        "Sex and birth date may be retained for clinical context."
+        "Sex and birth date may be retained for clinical context. "
+        "case_id is frontend-supplied, not from DICOM."
     )
 
     def to_llm_safe_dict(self) -> dict[str, Any]:
@@ -262,7 +264,8 @@ class DicomAnalyzeQueuedResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: uuid.UUID
-    case_id: str | None = None
+    # Frontend-supplied case id (set at enqueue; not from DICOM).
+    case_id: str
     source_file: str | None = None
     # Concrete model id (e.g. gemini-3.6-flash).
     provider: str

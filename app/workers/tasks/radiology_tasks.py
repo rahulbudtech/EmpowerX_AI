@@ -41,7 +41,6 @@ def analyze_dicom_task(
     self,
     finding_id: str,
     file_path: str,
-    case_id: str | None = None,
 ) -> dict:
     """
     Background job: preprocess DICOM → LLM findings → update Postgres row.
@@ -49,7 +48,8 @@ def analyze_dicom_task(
     Args:
         finding_id: UUID string of radiology_findings.id
         file_path: Absolute path (or future S3 URI) to the staged DICOM
-        case_id: Optional provisional case id
+
+    ``case_id`` is read from the findings row (set at enqueue from the frontend).
     """
     fid = uuid.UUID(finding_id)
     db = SessionLocal()
@@ -58,7 +58,6 @@ def analyze_dicom_task(
             db,
             finding_id=fid,
             file_path=file_path,
-            case_id=case_id,
         )
         return {"finding_id": finding_id, "status": "completed"}
     except FindingNotFoundError as exc:

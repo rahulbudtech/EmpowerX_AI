@@ -42,6 +42,42 @@ class WindowSource(str, Enum):
     NONE = "none"
 
 
+class ExposureHeuristicConfidence(str, Enum):
+    """How strongly pixel/DICOM metrics support the suggested exposure grade."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class ExposureQuality(str, Enum):
+    ADEQUATE = "Adequate"
+    SUBOPTIMAL = "Suboptimal"
+    INADEQUATE = "Inadequate"
+    UNDETERMINED = "Undetermined"
+
+
+class ExposureHeuristicAssessment(BaseModel):
+    """
+    Deterministic exposure QA from scaled pixels (+ optional EI/DI tags).
+
+    Stored on preprocessing metadata; fused with the LLM grade in the service.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    suggested_grade: ExposureQuality
+    confidence: ExposureHeuristicConfidence
+    reasons: list[str] = Field(default_factory=list)
+    black_clip_pct: float = 0.0
+    white_clip_pct: float = 0.0
+    dynamic_range_ratio: float = 0.0
+    mean_normalized: float = 0.0
+    exposure_index: float | None = None
+    deviation_index: float | None = None
+    target_exposure_index: float | None = None
+
+
 class PreprocessingInfo(BaseModel):
     """
     Technical record of the pixel pipeline (safe to store / send to LLM).
@@ -65,6 +101,8 @@ class PreprocessingInfo(BaseModel):
     window_width: float | None = None
     output_dtype: str = "uint8"
     output_range: list[int] = Field(default_factory=lambda: [0, 255])
+    # Pixel/DICOM heuristic exposure grade (fused with AI after findings LLM).
+    exposure_assessment: ExposureHeuristicAssessment | None = None
 
 
 class SafeDicomMetadata(BaseModel):
@@ -166,13 +204,6 @@ class ViewPosition(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class ExposureQuality(str, Enum):
-    ADEQUATE = "Adequate"
-    SUBOPTIMAL = "Suboptimal"
-    INADEQUATE = "Inadequate"
-    UNDETERMINED = "Undetermined"
-
-
 class Likelihood(str, Enum):
     DEFINITE = "Definite"
     PROBABLE = "Probable"
@@ -182,7 +213,13 @@ class Likelihood(str, Enum):
 
 
 class TechnicalMetadata(BaseModel):
-    """Copied from the DICOM METADATA block — model must not invent these."""
+    """
+    Report technical block.
+
+    ``view_position`` is system-derived (copy from DICOM METADATA).
+    ``exposure_quality`` / ``quality_notes`` are AI-proposed then fused with
+    pixel heuristics in the service.
+    """
 
     model_config = ConfigDict(extra="ignore")
 

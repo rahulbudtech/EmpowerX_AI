@@ -31,6 +31,7 @@ from PIL import Image
 from pydicom.dataset import Dataset
 from pydicom.misc import is_dicom
 
+from app.modules.radiology.exposure_quality import assess_exposure_heuristic
 from app.modules.radiology.schemas import (
     PreprocessingInfo,
     SafeDicomMetadata,
@@ -255,6 +256,14 @@ def preprocess_pixels(
     arr01 = handle_photometric(arr01, photometric)
     image_u8 = to_uint8(arr01)
 
+    exposure_assessment = assess_exposure_heuristic(
+        scaled,
+        image_u8,
+        exposure_index=_as_float(ds.get("ExposureIndex")),
+        deviation_index=_as_float(ds.get("DeviationIndex")),
+        target_exposure_index=_as_float(ds.get("TargetExposureIndex")),
+    )
+
     info = PreprocessingInfo(
         raw_shape=list(raw.shape),
         raw_dtype=str(raw.dtype),
@@ -269,6 +278,7 @@ def preprocess_pixels(
         window_source=window_source,
         window_center=window_center,
         window_width=window_width,
+        exposure_assessment=exposure_assessment,
     )
     return image_u8, info
 

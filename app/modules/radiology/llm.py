@@ -32,6 +32,7 @@ from app.modules.radiology.providers import (
     normalize_provider,
     resolve_api_key,
 )
+from app.modules.radiology.exposure_quality import heuristic_to_llm_hint
 from app.modules.radiology.schemas import RadiologyReport, SafeDicomMetadata
 
 # Re-export for existing ``from app.modules.radiology.llm import ...`` callers.
@@ -51,7 +52,9 @@ FINDINGS_PROMPT_PATH = PROMPTS_DIR / "findings.txt"
 
 USER_INSTRUCTION = (
     "Analyze this medical image and return ONLY a JSON object matching the schema.\n"
-    "Use the DICOM METADATA block below for technical_metadata (copy values verbatim)."
+    "For technical_metadata.view_position: copy verbatim from the DICOM METADATA block.\n"
+    "For technical_metadata.exposure_quality and quality_notes: judge from the image "
+    "(use EXPOSURE QUALITY HINTS only as optional guidance)."
 )
 
 
@@ -97,11 +100,14 @@ def derive_view_position(meta: SafeDicomMetadata) -> str:
 
 
 def build_dicom_metadata_block(meta: SafeDicomMetadata) -> dict[str, Any]:
-    """Values the model must copy into technical_metadata (not invent)."""
+    """
+    Context for the findings LLM.
+
+    ``view_position`` must be copied into technical_metadata.
+    Exposure grade is judged by the model (hints sent separately).
+    """
     return {
         "view_position": derive_view_position(meta),
-        "exposure_quality": "Undetermined",
-        "quality_notes": None,
         "patient_sex": meta.patient_sex,
         "patient_birth_date": meta.patient_birth_date,
         "modality": meta.modality,
@@ -116,14 +122,20 @@ def build_dicom_metadata_block(meta: SafeDicomMetadata) -> dict[str, Any]:
 
 
 def build_user_text(meta: SafeDicomMetadata) -> str:
-    """User message: instruction + DICOM METADATA block + extra safe context."""
+    """User message: instruction + DICOM block + exposure hints + safe context."""
     dicom_block = build_dicom_metadata_block(meta)
     safe = meta.to_llm_safe_dict()
     parts = [
         USER_INSTRUCTION,
-        "DICOM METADATA (copy technical_metadata fields from here):",
+        "DICOM METADATA (copy view_position into technical_metadata from here):",
         json.dumps(dicom_block, indent=2),
     ]
+    hint = heuristic_to_llm_hint(
+        meta.preprocessing.exposure_assessment if meta.preprocessing else None
+    )
+    if hint is not None:
+        parts.append("EXPOSURE QUALITY HINTS (optional guidance — judge from the image):")
+        parts.append(json.dumps(hint, indent=2))
     if safe:
         parts.append("Additional safe technical context (JSON):")
         parts.append(json.dumps(safe, indent=2))

@@ -16,9 +16,11 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.modules.radiology.exposure_quality import fuse_exposure_quality
 from app.modules.radiology.llm import (
     FindingsLLMError,
     FindingsLLMTransientError,
+    derive_view_position,
     generate_findings_report,
 )
 from app.modules.radiology.preprocess import (
@@ -53,6 +55,7 @@ from app.modules.radiology.schemas import (
     LlmTokenUsage,
     RadiologyReport,
     SafeDicomMetadata,
+    ViewPosition,
 )
 from app.modules.radiology.storage import save_preprocessed_image, save_upload_bytes
 from app.modules.radiology.token_cost import estimate_cost_usd
@@ -528,9 +531,22 @@ def _run_findings(
     except FindingsLLMError as exc:
         raise PermanentPipelineError(str(exc), token_usage=exc.usage) from exc
 
-    # System-filled after LLM — never trust model output for this key.
+    # System-owned fields after LLM: missing DICOM keys + fused exposure quality.
+    # view_position is forced from DICOM-derived value (model must not invent it).
+    view = derive_view_position(pre.metadata)
+    try:
+        view_position = ViewPosition(view)
+    except ValueError:
+        view_position = ViewPosition.UNKNOWN
+
+    fused_technical = fuse_exposure_quality(
+        pre.metadata.preprocessing.exposure_assessment,
+        llm_result.report.technical_metadata,
+    ).model_copy(update={"view_position": view_position})
+
     report = llm_result.report.model_copy(
         update={
+            "technical_metadata": fused_technical,
             "missing_dicom_fields": collect_missing_dicom_fields(pre.metadata),
         }
     )

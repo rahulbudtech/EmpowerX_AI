@@ -34,8 +34,11 @@ Return ONLY the JSON object (no markdown fences, no extra commentary).
 === RULES ===
 
 TECHNICAL METADATA
-- Copy values verbatim from the DICOM METADATA block in the user message.
-- Do not infer or modify them from the image. Missing → "UNKNOWN"/"Undetermined".
+- view_position: copy verbatim from the DICOM METADATA block. Do not infer from the image. Missing → "UNKNOWN".
+- exposure_quality / quality_notes: judge from the image (and optional EXPOSURE QUALITY HINTS).
+  Use Adequate | Suboptimal | Inadequate | Undetermined.
+  quality_notes: brief reason when not Adequate; otherwise null.
+  Hints are pixel/DICOM heuristics only — not final truth; you may disagree.
 
 FINDINGS
 - Imaging observations only. No diagnoses. No ICD-11 codes.

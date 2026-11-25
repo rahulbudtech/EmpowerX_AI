@@ -1,18 +1,15 @@
 """
-Radiology findings LLM (Gemini primary).
+Radiology findings LLM orchestration.
 
-Takes a preprocessed uint8 image + SafeDicomMetadata and returns a typed
-RadiologyReport plus provider token usage. Fallback provider/model is
-reserved in config but not wired yet.
-
-Prompt text lives in prompts/findings.txt and must stay exact.
+Shared prompt/parse live here. Provider clients live under ``providers/``.
+Primary + optional fallback are chosen from settings (not hardcoded).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -21,7 +18,33 @@ import numpy as np
 from PIL import Image
 
 from app.core.config import Settings, get_settings
-from app.modules.radiology.schemas import LlmTokenUsage, RadiologyReport, SafeDicomMetadata
+from app.modules.radiology.llm_errors import (
+    FindingsLLMError,
+    FindingsLLMTransientError,
+    FindingsLlmResult,
+)
+from app.modules.radiology.llm_settings import (
+    ResolvedLlmSelection,
+    selection_from_env,
+)
+from app.modules.radiology.providers import (
+    call_provider,
+    normalize_provider,
+    resolve_api_key,
+)
+from app.modules.radiology.schemas import RadiologyReport, SafeDicomMetadata
+
+# Re-export for existing ``from app.modules.radiology.llm import ...`` callers.
+__all__ = [
+    "FindingsLLMError",
+    "FindingsLLMTransientError",
+    "FindingsLlmResult",
+    "generate_findings_report",
+    "load_system_prompt",
+    "parse_radiology_report",
+]
+
+logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 FINDINGS_PROMPT_PATH = PROMPTS_DIR / "findings.txt"
@@ -30,108 +53,6 @@ USER_INSTRUCTION = (
     "Analyze this medical image and return ONLY a JSON object matching the schema.\n"
     "Use the DICOM METADATA block below for technical_metadata (copy values verbatim)."
 )
-
-
-class FindingsLLMError(Exception):
-    """Raised when the findings model call or JSON parse fails (permanent by default)."""
-
-    def __init__(self, message: str, *, usage: LlmTokenUsage | None = None) -> None:
-        super().__init__(message)
-        self.usage = usage
-
-
-class FindingsLLMTransientError(FindingsLLMError):
-    """Flaky provider/network — safe for Celery to retry."""
-
-
-@dataclass(slots=True)
-class FindingsLlmResult:
-    """Typed report plus token usage from one successful LLM call."""
-
-    report: RadiologyReport
-    usage: LlmTokenUsage
-
-
-def _is_transient_provider_error(exc: BaseException) -> bool:
-    """True for timeouts, rate limits, and 5xx-style Gemini/network failures."""
-    if isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError)):
-        return True
-
-    try:
-        import httpx
-
-        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)):
-            return True
-    except ImportError:
-        pass
-
-    try:
-        from google.genai import errors as genai_errors
-
-        if isinstance(exc, genai_errors.APIError):
-            code = int(getattr(exc, "code", 0) or 0)
-            if code in {408, 429, 500, 502, 503, 504}:
-                return True
-            server_err = getattr(genai_errors, "ServerError", None)
-            if server_err is not None and isinstance(exc, server_err):
-                return True
-    except ImportError:
-        pass
-
-    msg = str(exc).lower()
-    needles = (
-        "timeout",
-        "timed out",
-        "rate limit",
-        "resource exhausted",
-        "429",
-        "unavailable",
-        "503",
-        "502",
-        "504",
-        "connection reset",
-        "temporarily",
-    )
-    return any(n in msg for n in needles)
-
-
-def _raise_llm_call_error(
-    exc: BaseException,
-    *,
-    usage: LlmTokenUsage | None = None,
-) -> None:
-    """Map a provider exception to transient vs permanent FindingsLLMError."""
-    message = f"Gemini API call failed: {exc}"
-    if _is_transient_provider_error(exc):
-        raise FindingsLLMTransientError(message, usage=usage) from exc
-    raise FindingsLLMError(message, usage=usage) from exc
-
-
-def parse_gemini_usage_metadata(usage_metadata: Any, *, model: str) -> LlmTokenUsage:
-    """Map Gemini ``usage_metadata`` onto ``LlmTokenUsage`` (0s when absent)."""
-    if usage_metadata is None:
-        return LlmTokenUsage(llm_model=model)
-
-    def _int_field(*names: str) -> int:
-        for name in names:
-            raw = getattr(usage_metadata, name, None)
-            if raw is None and isinstance(usage_metadata, dict):
-                raw = usage_metadata.get(name)
-            if raw is not None:
-                try:
-                    return max(0, int(raw))
-                except (TypeError, ValueError):
-                    return 0
-        return 0
-
-    return LlmTokenUsage(
-        llm_model=model,
-        input_tokens=_int_field("prompt_token_count"),
-        output_tokens=_int_field("candidates_token_count"),
-        reasoning_tokens=_int_field("thoughts_token_count"),
-        cached_input_tokens=_int_field("cached_content_token_count"),
-        total_tokens=_int_field("total_token_count"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +131,7 @@ def build_user_text(meta: SafeDicomMetadata) -> str:
 
 
 def image_u8_to_pil(image_u8: np.ndarray) -> Image.Image:
-    """Convert HxW uint8 array to a PIL grayscale image for Gemini."""
+    """Convert HxW uint8 array to a PIL grayscale image for the LLM."""
     if image_u8.ndim != 2:
         raise FindingsLLMError(f"Expected 2D uint8 image, got shape {image_u8.shape}")
     return Image.fromarray(image_u8, mode="L")
@@ -253,104 +174,49 @@ def parse_radiology_report(raw: str) -> RadiologyReport:
 
 
 # ---------------------------------------------------------------------------
-# Gemini client
+# Orchestration (primary → optional fallback)
 # ---------------------------------------------------------------------------
 
 
-def _call_gemini(
+def _attempt_slots(selection: ResolvedLlmSelection) -> list[tuple[str, str]]:
+    """
+    Build ordered (provider, model) attempts from a resolved selection.
+
+    Primary is always first. Fallback is appended when both provider and model
+    are set and differ from primary.
+    """
+    primary_provider = normalize_provider(selection.primary_provider)
+    primary_model = (selection.primary_model or "").strip()
+    if not primary_model:
+        raise FindingsLLMError(
+            "Primary LLM model is missing. Set LLM_MODEL or save LLM settings."
+        )
+
+    slots: list[tuple[str, str]] = [(primary_provider, primary_model)]
+
+    fb_provider_raw = (selection.fallback_provider or "").strip()
+    fb_model = (selection.fallback_model or "").strip()
+    if fb_provider_raw and fb_model:
+        fb_provider = normalize_provider(fb_provider_raw)
+        if (fb_provider, fb_model) != (primary_provider, primary_model):
+            slots.append((fb_provider, fb_model))
+
+    return slots
+
+
+def _invoke_one(
     *,
+    provider: str,
     model: str,
-    api_key: str,
+    settings: Settings,
     system_prompt: str,
     user_text: str,
     image: Image.Image,
-) -> tuple[str, LlmTokenUsage]:
-    """
-    Call Gemini with system instruction + text + image.
-
-    Returns ``(response_text, token_usage)``. Uses the current Google GenAI
-    SDK (``google-genai``), not the deprecated ``google-generativeai`` package.
-    """
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=api_key)
-    contents = [user_text, image]
-    usage = LlmTokenUsage(llm_model=model)
-
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.1,
-                response_mime_type="application/json",
-            ),
-        )
-    except Exception as first_exc:
-        if _is_transient_provider_error(first_exc):
-            _raise_llm_call_error(first_exc, usage=usage)
-        # Some models reject response_mime_type — one local retry without it.
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.1,
-                ),
-            )
-        except Exception as second_exc:
-            _raise_llm_call_error(second_exc, usage=usage)
-
-    usage = parse_gemini_usage_metadata(
-        getattr(response, "usage_metadata", None),
-        model=model,
-    )
-    text = getattr(response, "text", None)
-    if not text:
-        # Empty payload is often a flaky provider response — allow Celery retry.
-        raise FindingsLLMTransientError(
-            f"Gemini returned empty content: {response!r}",
-            usage=usage,
-        )
-    return text.strip(), usage
-
-
-def generate_findings_report(
-    image_u8: np.ndarray,
-    metadata: SafeDicomMetadata,
-    *,
-    settings: Settings | None = None,
 ) -> FindingsLlmResult:
-    """
-    Run findings LLM on a preprocessed image + safe metadata.
-
-    Primary path: Gemini (LLM_PROVIDER / LLM_MODEL from settings).
-    Fallback provider is intentionally not implemented yet.
-    """
-    cfg = settings or get_settings()
-    provider = (cfg.llm_provider or "gemini").strip().lower()
-
-    if provider not in {"gemini", "google"}:
-        raise FindingsLLMError(
-            f"Unsupported LLM_PROVIDER '{provider}'. Phase 1 supports 'gemini' only "
-            "(fallback TBD)."
-        )
-
-    api_key = cfg.resolved_gemini_api_key
-    if not api_key:
-        raise FindingsLLMError(
-            "GEMINI_API_KEY (or GOOGLE_API_KEY) is missing. Set it in .env"
-        )
-
-    system_prompt = load_system_prompt()
-    user_text = build_user_text(metadata)
-    image = image_u8_to_pil(image_u8)
-
-    raw, usage = _call_gemini(
-        model=cfg.llm_model,
+    api_key = resolve_api_key(provider, settings=settings)
+    raw, usage = call_provider(
+        provider,
+        model=model,
         api_key=api_key,
         system_prompt=system_prompt,
         user_text=user_text,
@@ -360,4 +226,71 @@ def generate_findings_report(
         report = parse_radiology_report(raw)
     except FindingsLLMError as exc:
         raise FindingsLLMError(str(exc), usage=usage) from exc
-    return FindingsLlmResult(report=report, usage=usage)
+    return FindingsLlmResult(
+        report=report,
+        usage=usage,
+        provider=normalize_provider(provider),
+        model=model,
+    )
+
+
+def generate_findings_report(
+    image_u8: np.ndarray,
+    metadata: SafeDicomMetadata,
+    *,
+    settings: Settings | None = None,
+    selection: ResolvedLlmSelection | None = None,
+) -> FindingsLlmResult:
+    """
+    Run findings LLM on a preprocessed image + safe metadata.
+
+    Tries primary first; on failure tries fallback once when configured.
+    ``selection`` normally comes from DB (preferred) or env via
+    ``resolve_llm_selection``; when omitted, env defaults are used.
+    """
+    cfg = settings or get_settings()
+    resolved = selection or selection_from_env(cfg)
+    system_prompt = load_system_prompt()
+    user_text = build_user_text(metadata)
+    image = image_u8_to_pil(image_u8)
+
+    slots = _attempt_slots(resolved)
+    last_exc: FindingsLLMError | None = None
+
+    for index, (provider, model) in enumerate(slots):
+        try:
+            result = _invoke_one(
+                provider=provider,
+                model=model,
+                settings=cfg,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                image=image,
+            )
+            if index > 0:
+                logger.warning(
+                    "Findings LLM succeeded on fallback provider=%s model=%s",
+                    provider,
+                    model,
+                )
+            else:
+                logger.info(
+                    "Findings LLM succeeded provider=%s model=%s",
+                    provider,
+                    model,
+                )
+            return result
+        except FindingsLLMError as exc:
+            last_exc = exc
+            is_last = index >= len(slots) - 1
+            if is_last:
+                raise
+            logger.warning(
+                "Findings LLM primary failed provider=%s model=%s: %s — trying fallback",
+                provider,
+                model,
+                exc,
+            )
+
+    assert last_exc is not None
+    raise last_exc

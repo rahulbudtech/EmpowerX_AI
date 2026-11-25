@@ -19,7 +19,6 @@ Public entry points:
 from __future__ import annotations
 
 import json
-import uuid
 import warnings
 from dataclasses import dataclass
 from io import BytesIO
@@ -279,57 +278,6 @@ def preprocess_pixels(
 # ---------------------------------------------------------------------------
 
 
-def _looks_like_uuid(value: str) -> bool:
-    """True if value is a UUID string (e.g. upload staging folder name)."""
-    try:
-        uuid.UUID(value)
-        return True
-    except (ValueError, AttributeError, TypeError):
-        return False
-
-
-def derive_case_id_from_dataset(ds: Dataset) -> str | None:
-    """
-    Resolve case key from DICOM tags.
-
-    Demo/dataset case labels like ``DX001097`` live in AccessionNumber
-    (and often PatientID), not in StudyInstanceUID.
-
-    Order:
-      AccessionNumber → PatientID → StudyID →
-      StudyInstanceUID → SeriesInstanceUID → SOPInstanceUID
-    """
-    for tag in (
-        "AccessionNumber",
-        "PatientID",
-        "StudyID",
-        "StudyInstanceUID",
-        "SeriesInstanceUID",
-        "SOPInstanceUID",
-    ):
-        value = _safe_str(ds.get(tag))
-        if value:
-            return value
-    return None
-
-
-def resolve_case_id(
-    ds: Dataset,
-    *,
-    explicit_case_id: str | None = None,
-    fallback: str | None = None,
-) -> str | None:
-    """
-    Prefer identity from the DICOM itself; then explicit/API override;
-    then a folder-name fallback (ignored when it is a UUID upload dir).
-    """
-    safe_fallback = fallback
-    if safe_fallback and _looks_like_uuid(safe_fallback):
-        # uploads/{finding_id}/file.dcm — parent name must not become case_id
-        safe_fallback = None
-    return derive_case_id_from_dataset(ds) or explicit_case_id or safe_fallback
-
-
 def extract_safe_metadata(
     ds: Dataset,
     *,
@@ -390,8 +338,8 @@ def extract_safe_metadata(
 
 
 # Specialist-facing keys checked for missing_dicom_fields (stable UI order).
+# case_id is frontend-supplied (not a DICOM tag) — excluded on purpose.
 IMPORTANT_DICOM_FIELDS: tuple[str, ...] = (
-    "case_id",
     "patient_sex",
     "patient_birth_date",
     "modality",
@@ -463,21 +411,16 @@ def preprocess_dicom_path(
     """
     Preprocess a DICOM file from disk.
 
-    ``case_id`` in metadata prefers StudyInstanceUID from the DICOM.
-    Explicit ``case_id`` / parent folder name are fallbacks only.
+    ``case_id`` is caller-supplied only (frontend / API). Never derived from
+    DICOM tags or the upload folder name.
     """
     path = Path(path)
     _ensure_dicom_path(path)
     ds = _load_dataset_from_path(path)
-    resolved_case = resolve_case_id(
-        ds,
-        explicit_case_id=case_id,
-        fallback=path.parent.name,
-    )
     return _build_result(
         ds,
         source_name=path.name,
-        case_id=resolved_case,
+        case_id=case_id,
         use_dicom_window=use_dicom_window,
     )
 
@@ -494,16 +437,17 @@ def preprocess_dicom_bytes(
 
     Prefer this path in the API layer so uploads never need a temp write
     unless you explicitly want a sidecar on disk.
+
+    ``case_id`` is caller-supplied only — not read from DICOM tags.
     """
     if not data:
         raise DicomPreprocessError("Empty DICOM payload.")
     # Soft check: pydicom force=True still tries; surface clearer errors later.
     ds = _load_dataset_from_bytes(data)
-    resolved_case = resolve_case_id(ds, explicit_case_id=case_id)
     return _build_result(
         ds,
         source_name=source_name,
-        case_id=resolved_case,
+        case_id=case_id,
         use_dicom_window=use_dicom_window,
     )
 

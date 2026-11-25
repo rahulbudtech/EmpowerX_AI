@@ -14,14 +14,19 @@ from app.modules.auth.schemas import AccessTokenClaims
 from app.modules.radiology.schemas import (
     DicomAnalyzeBatchQueuedResponse,
     FindingsDetailResponse,
+    LlmSettingsResponse,
+    LlmSettingsUpdateRequest,
 )
 from app.modules.radiology.service import (
     FindingNotFoundError,
+    InvalidLlmSettingsError,
     InvalidUploadError,
     RadiologyServiceError,
     UploadFilePayload,
     enqueue_dicom_batch,
     get_findings,
+    get_llm_settings,
+    update_llm_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,20 +45,21 @@ async def analyze_dicom(
         ...,
         description="1 to 3 DICOM files (.dcm / .dicom), max 10 MB each",
     ),
-    case_id: str | None = Form(
-        default=None,
-        description="Optional provisional case id (applied to all files in the batch)",
+    case_id: str = Form(
+        ...,
+        description="Case id from the frontend (applied to all files in the batch)",
     ),
     db: Session = Depends(get_db),
     caller: AccessTokenClaims = Depends(require_analyze_caller),
 ) -> DicomAnalyzeBatchQueuedResponse:
     """Accept uploads → queue one job per file → return job ids immediately."""
     logger.info(
-        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s",
+        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s case_id=%s",
         caller.user_id,
         caller.facility_id,
         caller.role,
         caller.type,
+        case_id,
     )
     payloads = [
         UploadFilePayload(data=await f.read(), filename=f.filename) for f in files
@@ -88,5 +94,38 @@ def read_findings(
     except FindingNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/llm-settings",
+    response_model=LlmSettingsResponse,
+    summary="Get primary/fallback LLM selection and allowed options",
+)
+def read_llm_settings(
+    db: Session = Depends(get_db),
+    _caller: AccessTokenClaims = Depends(require_analyze_caller),
+) -> LlmSettingsResponse:
+    """DB selection when saved; otherwise env defaults. Includes dropdown options."""
+    return get_llm_settings(db)
+
+
+@router.put(
+    "/llm-settings",
+    response_model=LlmSettingsResponse,
+    summary="Save primary/fallback LLM selection",
+)
+def write_llm_settings(
+    body: LlmSettingsUpdateRequest,
+    db: Session = Depends(get_db),
+    _caller: AccessTokenClaims = Depends(require_analyze_caller),
+) -> LlmSettingsResponse:
+    """Persist singleton settings; subsequent analyze jobs use this until changed."""
+    try:
+        return update_llm_settings(db, body)
+    except InvalidLlmSettingsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc

@@ -28,6 +28,13 @@ from app.modules.radiology.preprocess import (
     preprocess_dicom_bytes,
     preprocess_dicom_path,
 )
+from app.modules.radiology.llm_settings import (
+    LlmSettingsValidationError,
+    ResolvedLlmSelection,
+    resolve_llm_selection,
+    to_settings_response,
+    validate_settings_update,
+)
 from app.modules.radiology.repository import (
     accumulate_token_usage,
     create_queued_finding,
@@ -35,11 +42,14 @@ from app.modules.radiology.repository import (
     mark_finding_completed,
     mark_finding_failed,
     mark_finding_processing,
+    upsert_llm_settings,
 )
 from app.modules.radiology.schemas import (
     DicomAnalyzeBatchQueuedResponse,
     DicomAnalyzeQueuedResponse,
     FindingsDetailResponse,
+    LlmSettingsResponse,
+    LlmSettingsUpdateRequest,
     LlmTokenUsage,
     RadiologyReport,
     SafeDicomMetadata,
@@ -61,6 +71,10 @@ class RadiologyServiceError(Exception):
 
 class InvalidUploadError(RadiologyServiceError):
     """Client upload is missing or empty / over limits (maps to HTTP 400)."""
+
+
+class InvalidLlmSettingsError(RadiologyServiceError):
+    """LLM settings body failed validation (maps to HTTP 400)."""
 
 
 class FindingNotFoundError(RadiologyServiceError):
@@ -168,7 +182,10 @@ def _persist_token_usage_best_effort(
     if usage is None:
         return
     try:
-        cost = estimate_cost_usd(usage, settings.gemini_token_cost_rates())
+        cost = estimate_cost_usd(
+            usage,
+            settings.token_cost_rates_for_model(usage.llm_model),
+        )
         accumulate_token_usage(
             db,
             finding_id=finding_id,
@@ -184,20 +201,30 @@ def _persist_token_usage_best_effort(
         )
 
 
+def _require_case_id(case_id: str | None) -> str:
+    """Normalize frontend case_id; blank/whitespace is rejected."""
+    value = (case_id or "").strip()
+    if not value:
+        raise InvalidUploadError("case_id is required.")
+    return value
+
+
 def enqueue_dicom_analyze(
     data: bytes,
     *,
     db: Session,
+    case_id: str,
     filename: str | None = None,
-    case_id: str | None = None,
     settings: Settings | None = None,
 ) -> DicomAnalyzeQueuedResponse:
     """
     Stage one DICOM, create ``queued`` row, push Celery task.
 
     Prefer ``enqueue_dicom_batch`` from the API (applies count/size limits).
+    ``case_id`` must come from the frontend (never from DICOM).
     """
     cfg = settings or get_settings()
+    normalized_case_id = _require_case_id(case_id)
     max_bytes = cfg.max_dicom_file_size_mb * 1024 * 1024
     _validate_one_dicom_upload(
         UploadFilePayload(data=data, filename=filename),
@@ -208,20 +235,27 @@ def enqueue_dicom_analyze(
     finding_id = uuid.uuid4()
     file_path = save_upload_bytes(data, finding_id=finding_id, filename=source_name)
 
+    selection = resolve_llm_selection(db, settings=cfg)
     row = create_queued_finding(
         db,
         finding_id=finding_id,
-        # Persist concrete model id (e.g. gemini-3.6-flash), not vendor label.
-        provider=cfg.llm_model,
-        case_id=case_id,
+        # Planned primary model at enqueue; completed jobs overwrite with the
+        # model that actually produced the report (primary or fallback).
+        provider=selection.primary_model,
+        case_id=normalized_case_id,
         source_file=source_name,
     )
 
     # Late import avoids circular import at module load (celery → tasks → service).
     from app.workers.tasks.radiology_tasks import analyze_dicom_task
 
-    analyze_dicom_task.delay(str(row.id), str(file_path), None)
-    logger.info("Enqueued radiology.analyze_dicom finding_id=%s path=%s", row.id, file_path)
+    analyze_dicom_task.delay(str(row.id), str(file_path))
+    logger.info(
+        "Enqueued radiology.analyze_dicom finding_id=%s case_id=%s path=%s",
+        row.id,
+        row.case_id,
+        file_path,
+    )
 
     return DicomAnalyzeQueuedResponse(
         id=row.id,
@@ -236,13 +270,16 @@ def enqueue_dicom_batch(
     files: list[UploadFilePayload],
     *,
     db: Session,
-    case_id: str | None = None,
+    case_id: str,
     settings: Settings | None = None,
 ) -> DicomAnalyzeBatchQueuedResponse:
     """
-    API entry: validate 1-3 DICOMs (max 10 MB each) -> enqueue one Celery job per file.
+    API entry: validate 1-3 DICOMs (max 10 MB each) → enqueue one Celery job per file.
+
+    ``case_id`` is required from the frontend and applied to every job in the batch.
     """
     cfg = settings or get_settings()
+    normalized_case_id = _require_case_id(case_id)
     _validate_upload_batch(files, settings=cfg)
 
     jobs = [
@@ -250,7 +287,7 @@ def enqueue_dicom_batch(
             item.data,
             db=db,
             filename=item.filename,
-            case_id=case_id,
+            case_id=normalized_case_id,
             settings=cfg,
         )
         for item in files
@@ -263,7 +300,6 @@ def process_queued_dicom(
     *,
     finding_id: uuid.UUID,
     file_path: str | Path,
-    case_id: str | None = None,
     settings: Settings | None = None,
 ) -> None:
     """
@@ -274,6 +310,9 @@ def process_queued_dicom(
     ``TransientPipelineError`` so Celery can retry (failed only after max retries).
 
     When the LLM ran, token usage is accumulated even if the job fails or retries.
+
+    ``case_id`` is taken only from the findings row (set at enqueue from the
+    frontend). It is never derived from DICOM metadata.
     """
     cfg = settings or get_settings()
     path = Path(file_path)
@@ -282,22 +321,20 @@ def process_queued_dicom(
     if row is None:
         raise FindingNotFoundError(f"Findings not found: {finding_id}")
 
-    resolved_case_id = case_id or row.case_id
+    # Source of truth: frontend case_id stored on the finding at enqueue.
+    job_case_id = row.case_id
 
     try:
-        # case_id comes from DICOM AccessionNumber via preprocess (not upload folder).
         try:
             pre = preprocess_dicom_path(
                 path,
                 use_dicom_window=True,
-                case_id=None,
+                case_id=job_case_id,
             )
         except FileNotFoundError as exc:
             raise PermanentPipelineError(str(exc)) from exc
         except DicomPreprocessError as exc:
             raise PermanentPipelineError(str(exc)) from exc
-
-        resolved_case_id = pre.metadata.case_id or resolved_case_id
 
         # Local PNG until S3 — same disk as worker/API via PREPROCESS_IMAGE_DIR.
         image_path = save_preprocessed_image(
@@ -306,27 +343,29 @@ def process_queued_dicom(
             settings=cfg,
         )
 
-        result = _run_findings(pre, settings=cfg)
+        selection = resolve_llm_selection(db, settings=cfg)
+        result = _run_findings(pre, settings=cfg, selection=selection)
         mark_finding_completed(
             db,
             finding_id,
             report=result.report,
             modality=result.metadata.modality,
-            case_id=result.metadata.case_id,
             source_file=result.metadata.source_file or row.source_file,
             preprocess_metadata=result.metadata.model_dump(mode="json"),
             preprocess_image_url=str(image_path),
+            provider=result.provider,
         )
         _persist_token_usage_best_effort(
             db,
             finding_id=finding_id,
             usage=result.usage,
-            case_id=result.metadata.case_id or resolved_case_id,
+            case_id=job_case_id,
             settings=cfg,
         )
         logger.info(
-            "Completed radiology analyze finding_id=%s image=%s",
+            "Completed radiology analyze finding_id=%s case_id=%s image=%s",
             finding_id,
+            job_case_id,
             image_path,
         )
     except TransientPipelineError as exc:
@@ -339,7 +378,7 @@ def process_queued_dicom(
             db,
             finding_id=finding_id,
             usage=exc.token_usage,
-            case_id=resolved_case_id,
+            case_id=job_case_id,
             settings=cfg,
         )
         raise
@@ -350,7 +389,7 @@ def process_queued_dicom(
             db,
             finding_id=finding_id,
             usage=exc.token_usage,
-            case_id=resolved_case_id,
+            case_id=job_case_id,
             settings=cfg,
         )
         raise
@@ -408,7 +447,7 @@ def analyze_dicom_path(
     except DicomPreprocessError as exc:
         raise PermanentPipelineError(str(exc)) from exc
 
-    return _run_findings(pre, settings=cfg)
+    return _run_findings(pre, settings=cfg, selection=None)
 
 
 def analyze_dicom_bytes(
@@ -431,15 +470,58 @@ def analyze_dicom_bytes(
     except DicomPreprocessError as exc:
         raise PermanentPipelineError(str(exc)) from exc
 
-    return _run_findings(pre, settings=cfg)
+    return _run_findings(pre, settings=cfg, selection=None)
 
 
-def _run_findings(pre: PreprocessResult, *, settings: Settings) -> AnalyzeResult:
+def get_llm_settings(
+    db: Session,
+    *,
+    settings: Settings | None = None,
+) -> LlmSettingsResponse:
+    """Return current primary/fallback selection (DB if set, else env) + options."""
+    cfg = settings or get_settings()
+    selection = resolve_llm_selection(db, settings=cfg)
+    return to_settings_response(selection)
+
+
+def update_llm_settings(
+    db: Session,
+    body: LlmSettingsUpdateRequest,
+    *,
+    settings: Settings | None = None,
+) -> LlmSettingsResponse:
+    """Validate, persist singleton settings, return the updated view."""
+    cfg = settings or get_settings()
+    try:
+        primary_provider, primary_model, fallback_provider, fallback_model = (
+            validate_settings_update(body)
+        )
+    except LlmSettingsValidationError as exc:
+        raise InvalidLlmSettingsError(str(exc)) from exc
+
+    upsert_llm_settings(
+        db,
+        primary_provider=primary_provider,
+        primary_model=primary_model,
+        fallback_provider=fallback_provider,
+        fallback_model=fallback_model,
+    )
+    selection = resolve_llm_selection(db, settings=cfg)
+    return to_settings_response(selection)
+
+
+def _run_findings(
+    pre: PreprocessResult,
+    *,
+    settings: Settings,
+    selection: ResolvedLlmSelection | None,
+) -> AnalyzeResult:
     try:
         llm_result = generate_findings_report(
             pre.image_u8,
             pre.metadata,
             settings=settings,
+            selection=selection,
         )
     except FindingsLLMTransientError as exc:
         raise TransientPipelineError(str(exc), token_usage=exc.usage) from exc
@@ -457,6 +539,7 @@ def _run_findings(pre: PreprocessResult, *, settings: Settings) -> AnalyzeResult
         report=report,
         metadata=pre.metadata,
         preprocess=pre,
-        provider=settings.llm_model,
+        # Concrete model that produced the report (primary or fallback).
+        provider=llm_result.model,
         usage=llm_result.usage,
     )

@@ -198,9 +198,8 @@ def _persist_token_usage_best_effort(
         )
     except Exception:  # noqa: BLE001 — usage must not fail the job
         logger.exception(
-            "Failed to persist radiology token usage finding_id=%s case_id=%s",
+            "Failed to persist radiology token usage finding_id=%s",
             finding_id,
-            case_id,
         )
 
 
@@ -254,10 +253,8 @@ def enqueue_dicom_analyze(
 
     analyze_dicom_task.delay(str(row.id), str(file_path))
     logger.info(
-        "Enqueued radiology.analyze_dicom finding_id=%s case_id=%s path=%s",
+        "Enqueued radiology.analyze_dicom finding_id=%s",
         row.id,
-        row.case_id,
-        file_path,
     )
 
     return DicomAnalyzeQueuedResponse(
@@ -366,10 +363,8 @@ def process_queued_dicom(
             settings=cfg,
         )
         logger.info(
-            "Completed radiology analyze finding_id=%s case_id=%s image=%s",
+            "Completed radiology analyze finding_id=%s",
             finding_id,
-            job_case_id,
-            image_path,
         )
     except TransientPipelineError as exc:
         logger.warning(

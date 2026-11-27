@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_analyze_caller, require_service_api_key_optional_user
+from app.core.config import get_settings
 from app.infrastructure.database import get_db
 from app.modules.auth.schemas import AccessTokenClaims
 from app.modules.radiology.schemas import (
@@ -27,6 +28,10 @@ from app.modules.radiology.service import (
     get_findings,
     get_llm_settings,
     update_llm_settings,
+)
+from app.modules.radiology.upload_validation import (
+    UploadTooLargeError,
+    read_upload_with_size_cap,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,16 +59,36 @@ async def analyze_dicom(
 ) -> DicomAnalyzeBatchQueuedResponse:
     """Accept uploads → queue one job per file → return job ids immediately."""
     logger.info(
-        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s case_id=%s",
+        "dicom analyze accepted user_id=%s facility_id=%s role=%s type=%s",
         caller.user_id,
         caller.facility_id,
         caller.role,
         caller.type,
-        case_id,
     )
-    payloads = [
-        UploadFilePayload(data=await f.read(), filename=f.filename) for f in files
-    ]
+    cfg = get_settings()
+    max_files = cfg.max_dicom_files_per_request
+    max_bytes = cfg.max_dicom_file_size_mb * 1024 * 1024
+
+    if len(files) > max_files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Too many files: got {len(files)}, maximum is {max_files}.",
+        )
+
+    payloads: list[UploadFilePayload] = []
+    try:
+        for upload in files:
+            data = await read_upload_with_size_cap(upload, max_bytes=max_bytes)
+            payloads.append(UploadFilePayload(data=data, filename=upload.filename))
+    except UploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+    finally:
+        for upload in files:
+            await upload.close()
+
     try:
         return enqueue_dicom_batch(payloads, db=db, case_id=case_id)
     except InvalidUploadError as exc:

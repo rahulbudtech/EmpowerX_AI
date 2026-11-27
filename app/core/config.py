@@ -8,9 +8,16 @@ as the documented template.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Environments that must fail closed (no insecure local defaults).
+_DEPLOYED_APP_ENVS = frozenset({"staging", "production", "uat"})
+_DEFAULT_DATABASE_URL = (
+    "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/empowerx"
+)
 
 
 class Settings(BaseSettings):
@@ -20,6 +27,18 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+    )
+
+    # --- Runtime environment ---
+    app_env: str = Field(
+        default="local",
+        alias="APP_ENV",
+        description="local | staging | uat | production — deployed modes fail closed",
+    )
+    enable_openapi: bool = Field(
+        default=False,
+        alias="ENABLE_OPENAPI",
+        description="When true, expose /docs /redoc /openapi.json (local opt-in)",
     )
 
     # --- LLM primary (any supported provider; switch via env) ---
@@ -78,7 +97,7 @@ class Settings(BaseSettings):
 
     # --- Postgres ---
     database_url: str = Field(
-        default="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/empowerx",
+        default=_DEFAULT_DATABASE_URL,
         alias="DATABASE_URL",
     )
 
@@ -117,7 +136,11 @@ class Settings(BaseSettings):
         alias="JWT_ACCESS_SECRET",
         description="HS256 secret used by Node to sign access JWTs",
     )
-    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_algorithm: str = Field(
+        default="HS256",
+        alias="JWT_ALGORITHM",
+        description="Must remain HS256; decode always pins HS256 regardless",
+    )
 
     # Comma-separated browser origins allowed by CORS
     cors_origins: str = Field(
@@ -130,6 +153,57 @@ class Settings(BaseSettings):
         ),
         alias="CORS_ORIGINS",
     )
+
+    @model_validator(mode="after")
+    def _fail_closed_when_deployed(self) -> Self:
+        """Refuse insecure defaults outside local development."""
+        env = (self.app_env or "").strip().lower()
+        if env not in _DEPLOYED_APP_ENVS:
+            return self
+
+        problems: list[str] = []
+        db = (self.database_url or "").strip()
+        if (
+            not db
+            or db == _DEFAULT_DATABASE_URL
+            or "postgres:postgres@" in db
+        ):
+            problems.append("DATABASE_URL must be set to a non-default value")
+
+        if not (self.ai_service_key or "").strip():
+            problems.append("AI_SERVICE_KEY is required")
+
+        if not (self.jwt_access_secret or "").strip():
+            problems.append("JWT_ACCESS_SECRET is required")
+
+        if (self.jwt_algorithm or "").strip().upper() != "HS256":
+            problems.append("JWT_ALGORITHM must be HS256")
+
+        provider = (self.llm_provider or "").strip().lower()
+        if provider == "gemini" and not self.resolved_gemini_api_key:
+            problems.append("GEMINI_API_KEY (or GOOGLE_API_KEY) is required")
+        elif provider == "anthropic" and not (self.anthropic_api_key or "").strip():
+            problems.append("ANTHROPIC_API_KEY is required")
+
+        fallback = (self.llm_fallback_provider or "").strip().lower()
+        if fallback == "gemini" and not self.resolved_gemini_api_key:
+            problems.append(
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required for LLM_FALLBACK_PROVIDER"
+            )
+        elif fallback == "anthropic" and not (self.anthropic_api_key or "").strip():
+            problems.append("ANTHROPIC_API_KEY is required for LLM_FALLBACK_PROVIDER")
+
+        if problems:
+            # Never include secret values in the error text.
+            raise ValueError(
+                f"Invalid settings for APP_ENV={env}: " + "; ".join(problems)
+            )
+        return self
+
+    @property
+    def is_deployed_env(self) -> bool:
+        """True when APP_ENV is staging / uat / production."""
+        return (self.app_env or "").strip().lower() in _DEPLOYED_APP_ENVS
 
     @property
     def cors_origins_list(self) -> list[str]:

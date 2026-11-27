@@ -64,11 +64,12 @@ def decode_access_token(
         logger.error("JWT_ACCESS_SECRET is not configured")
         raise AuthError("Token authentication is not configured")
 
+    # Always HS256 — do not accept algorithm from untrusted JWT header / env drift.
     try:
         payload = jwt.decode(
             token,
             secret,
-            algorithms=[cfg.jwt_algorithm],
+            algorithms=["HS256"],
             options={"require": ["exp", "sub", "type"]},
         )
     except InvalidTokenError as exc:
